@@ -1,0 +1,109 @@
+# Advanced OCR Configuration File
+
+# LLM Provider Settings
+llm:
+  primary_provider: "gemini"  # openai, anthropic, gemini, or qwen
+  fallback_provider: "qwen"  # openai, anthropic, gemini, qwen, or null
+
+  openai:
+    model: "gpt-4-vision-preview"
+    max_tokens: 4096
+    temperature: 0.1
+    detail: "high"  # low, high, or auto
+
+  anthropic:
+    model: "claude-3-sonnet-20240229"  # opus, sonnet, or haiku
+    max_tokens: 4096
+    temperature: 0.1
+
+  gemini:
+    model: "gemini-1.5-flash"  # gemini-1.5-pro or gemini-1.5-flash
+    max_tokens: 4096
+    temperature: 0.1
+
+  qwen:
+    model: "qwen-vl-plus"  # qwen-vl-plus or qwen-vl-max
+    max_tokens: 4096
+    temperature: 0.1
+
+  retry:
+    max_attempts: 3
+    delay_seconds: 2
+    backoff_multiplier: 2
+
+# Image Processing Settings
+image:
+  max_size_mb: 10
+  supported_formats:
+    - png
+    - jpg
+    - jpeg
+    - pdf
+  quality: 95
+  preprocessing:
+    resize_if_large: true
+    max_dimension: 2048
+    enhance_contrast: false
+    denoise: false
+
+# Formula Conversion Settings
+formula:
+  output_format: "mathml"  # mathml or latex
+  preserve_latex: false  # Keep LaTeX in comments
+  inline_formulas: true
+  
+# Document Generation Settings
+document:
+  default_font: "Arial"
+  default_font_size: 11
+  heading_font_size: 14
+  include_original_image: true
+  image_width_inches: 6.0
+  page_margins:
+    top: 1.0
+    bottom: 1.0
+    left: 1.0
+    right: 1.0
+  
+# Prompt Templates
+prompts:
+  system_message: |
+    You are an expert in accurately transcribing mathematical content from images.
+    Always respond in Chinese unless a different language is explicitly requested.
+    Your task is to faithfully reproduce ALL content from the image exactly as it appears.
+    Preserve the original layout, order, and formatting of the text and formulas.
+    For formulas: use $...$ for inline expressions and $$...$$ for display equations.
+    Do not add any section headings, explanations, or additional commentary.
+    Do not reorganize or restructure the content.
+    Simply transcribe what you see in the image, maintaining the original presentation.
+  user_message: |
+    请完整还原这张图片中的所有内容，保持原有格式和顺序。
+    
+    要求：
+    - 逐字逐句转录图片中的所有文字
+    - 公式按原位置输出：行内公式用 $公式$，单独成行的公式用 $$公式$$
+    - 不要添加任何章节标题、分类或额外说明
+    - 不要重新组织或调整内容结构
+    - 保持图片中原有的段落分隔和排版
+
+# Logging Settings
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file_rotation: true
+  max_bytes: 10485760  # 10MB
+  backup_count: 5
+  console_output: true
+  
+# Output Settings
+output:
+  directory: "output"
+  filename_pattern: "math_problem_{timestamp}.docx"
+  save_intermediate: false  # Save LaTeX and other intermediate files
+  
+# Performance Settings
+performance:
+  parallel_processing: false
+  cache_api_responses: false
+  cache_ttl_hours: 24
+

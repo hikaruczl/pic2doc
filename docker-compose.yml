@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  # Gradio Web界面
+  gradio:
+    build: .
+    container_name: advanceocr-gradio
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./output:/app/output
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+    environment:
+      - LOG_LEVEL=INFO
+      - PYTHONUNBUFFERED=1
+    command: python web_app.py
+    restart: unless-stopped
+    networks:
+      - advanceocr-network
+  
+  # FastAPI后端
+  fastapi:
+    build: .
+    container_name: advanceocr-fastapi
+    ports:
+      - "8005:8005"
+    volumes:
+      - ./output:/app/output
+      - ./logs:/app/logs
+      - ./uploads:/app/uploads
+      - ./.env:/app/.env:ro
+    environment:
+      - LOG_LEVEL=INFO
+      - PYTHONUNBUFFERED=1
+    command: python web/backend/app.py
+    restart: unless-stopped
+    networks:
+      - advanceocr-network
+
+networks:
+  advanceocr-network:
+    driver: bridge
+
