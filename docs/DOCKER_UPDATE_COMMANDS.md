@@ -8,9 +8,35 @@
 - **适用**: 修改环境变量、配置刷新
 
 ### `docker compose up -d`
-- **作用**: 停止旧容器，用新镜像创建新容器
+- **作用**: 自动检测变化，停止旧容器，创建新容器
 - **会**: 使用最新构建的镜像
 - **适用**: 代码更新、镜像重新构建后
+- **智能**: 无需手动 stop，自动替换
+
+### `docker compose down`
+- **作用**: 停止并删除所有容器
+- **警告**: 会删除容器（但不删除 volumes）
+- **适用**: 完全重新部署
+
+## `up -d` 的智能行为
+
+**不需要手动 stop！** Docker Compose 会自动：
+
+1. 检测镜像是否变化
+2. 如果镜像变了，停止旧容器
+3. 创建新容器
+4. 平滑切换（几乎无中断）
+
+```bash
+# ❌ 多余的操作
+docker compose stop frontend    # 不需要！
+docker compose build frontend
+docker compose up -d frontend
+
+# ✅ 正确且简洁
+docker compose build frontend
+docker compose up -d frontend   # 自动停止旧的，启动新的
+```
 
 ## 常见场景
 
