@@ -403,30 +403,30 @@ async def process_image(
     current_user: str = Depends(get_current_user),
 ):
     """
-    处理单个图像
-    
+    处理单个图像（异步模式）
+
     Args:
         file: 上传的图像文件
         llm_provider: LLM提供商
         include_original_image: 是否包含原始图像
         image_quality: 图像质量
-        
+
     Returns:
-        任务ID和状态
+        任务ID和状态，客户端需轮询 /api/task/{task_id} 获取处理结果
     """
     try:
         # 生成任务ID
         task_id = str(uuid.uuid4())
-        
+
         # 保存上传的文件
         upload_dir = Path("uploads")
         upload_dir.mkdir(exist_ok=True)
-        
+
         file_path = upload_dir / f"{task_id}_{file.filename}"
         with open(file_path, "wb") as f:
             content = await file.read()
             f.write(content)
-        
+
         # 创建任务
         task = {
             "task_id": task_id,
@@ -444,22 +444,18 @@ async def process_image(
             },
             "user": current_user,
         }
-        
+
         tasks[task_id] = task
-        
-        # 在后台处理
-        if background_tasks:
-            background_tasks.add_task(process_task, task_id)
-        else:
-            # 同步处理 (用于测试)
-            await process_task(task_id)
-        
+
+        # 始终异步处理，避免超时
+        asyncio.create_task(process_task(task_id))
+
         return {
             "task_id": task_id,
             "status": "pending",
-            "message": "任务已提交,正在处理中"
+            "message": "任务已提交,正在处理中，请使用 task_id 查询处理状态"
         }
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
