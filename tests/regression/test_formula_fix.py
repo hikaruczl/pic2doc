@@ -2,13 +2,20 @@
 """
 测试公式插入修复
 """
+from pathlib import Path
+import sys
 import yaml
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from src.document_generator import DocumentGenerator
 from src.formula_converter import FormulaConverter
 from docx import Document
 
 # 加载配置
-with open('config/config.yaml', 'r', encoding='utf-8') as f:
+with open(ROOT_DIR / 'config' / 'config.yaml', 'r', encoding='utf-8') as f:
     config = yaml.safe_load(f)
 
 # 创建实例
@@ -71,7 +78,7 @@ for latex, formula_type in test_formulas:
         print(f"✗ 添加公式失败: {latex} - {str(e)}")
 
 # 保存测试文档
-output_path = 'output/test_formula_fix.docx'
+output_path = ROOT_DIR / 'output' / 'test_formula_fix.docx'
 try:
     doc.save(output_path)
     print(f"\n✓ 测试文档已保存: {output_path}")

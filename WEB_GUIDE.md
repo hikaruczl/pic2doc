@@ -1,526 +1,158 @@
-# Web界面使用指南
+# Web界面使用指南（React + FastAPI）
 
-Advanced OCR提供两种Web界面方案:
-1. **Gradio界面** - 快速简单,适合个人使用
-2. **FastAPI + 前端** - 完整方案,适合生产部署
+本指南介绍如何使用 Advanced OCR 的现代 Web 方案：**React 前端 + FastAPI 后端**。旧版 Gradio 界面已在代码库中移除，如需历史说明，请参考 `WEB_DEPRECATION_SUMMARY.md`。
 
 ---
 
-## 🚀 方案1: Gradio Web界面 (推荐快速开始)
+## 🧱 架构概览
 
-### 特点
-- ✅ 零配置,开箱即用
-- ✅ 美观的现代化界面
-- ✅ 支持单图像和批量处理
-- ✅ 实时进度显示
-- ✅ 内置帮助文档
+- **前端**：`web/frontend/`（React + Vite），负责上传文件、展示进度与结果
+- **后端**：`web/backend/app.py`（FastAPI），提供认证、任务调度与文件下载
+- **鉴权**：默认使用 `config/users.yaml` 中配置的账号密码（JWT）
+- **静态资源**：处理结果保存在 `output/` 目录，日志保存在 `logs/`
 
-### 安装
+---
+
+## 🚀 快速开始
+
+### 1. 准备依赖
 
 ```bash
-# 安装依赖
-pip install gradio
-
-# 或使用完整requirements
+# Python 依赖
 pip install -r requirements.txt
+
+# Node 依赖（首次）
+npm --prefix web/frontend install
 ```
 
-### 启动
+### 2. 启动服务
 
+#### 一键启动
 ```bash
-# 启动Web界面
-python web_app.py
+./start_services.sh
+# Backend: http://localhost:8005
+# Frontend: http://localhost:5173
 ```
 
-访问: http://localhost:7860
-
-### 使用步骤
-
-1. **配置API密钥**
-   - 确保 `.env` 文件中已配置API密钥
-   - 至少配置一个LLM提供商的密钥
-
-2. **单图像处理**
-   - 点击"单图像处理"标签页
-   - 上传图像文件
-   - 选择LLM提供商
-   - 配置选项 (可选)
-   - 点击"开始处理"
-   - 等待处理完成
-   - 下载Word文档
-
-3. **批量处理**
-   - 点击"批量处理"标签页
-   - 上传多个图像文件
-   - 选择LLM提供商
-   - 点击"批量处理"
-   - 查看处理结果
-   - 在 `output/` 目录查找生成的文档
-
-### 配置选项
-
-#### LLM提供商
-- **Gemini** (推荐): 性价比最高
-- **Anthropic**: 平衡准确率和成本
-- **OpenAI**: 最高准确率
-- **Qwen**: 国内用户优选
-
-#### 其他选项
-- **包含原始图像**: 是否在Word中嵌入原始图像
-- **图像质量**: 70-100,影响文件大小
-
-### 高级配置
-
-编辑 `web_app.py` 自定义:
-
-```python
-# 修改端口
-demo.launch(
-    server_port=8080,  # 自定义端口
-    share=True,        # 生成公网链接
-    auth=("user", "pass")  # 添加认证
-)
-```
-
-### 公网访问
-
+#### 手动启动（可选）
 ```bash
-# 生成临时公网链接
-python web_app.py --share
+# 终端 1：FastAPI 后端
+uvicorn web.backend.app:app --host 0.0.0.0 --port 8005
+
+# 终端 2：React 前端（开发模式）
+npm --prefix web/frontend run dev -- --host 0.0.0.0 --port 5173
+```
+
+首选账号位于 `config/users.yaml`，默认示例：`admin / admin123`。
+
+---
+
+## 🖥️ 使用前端界面
+
+1. 浏览器访问 `http://localhost:5173`
+2. 可使用配置文件中的账号直接登录，或点击「手机号注册」「忘记密码」完成验证码校验后登录
+3. 在「单图像」或「批量处理」模块拖拽或选择待处理图片
+4. 选择 LLM 提供商与模型（遵循 `.env` 与 `config/config.yaml`）
+5. 点击开始处理，实时查看进度与日志片段
+6. 完成后下载生成的 Word 文档或查看历史记录
+
+> 提示：批量任务会在后台序列化执行，可通过界面查看状态与失败原因。
+
+---
+
+## 🔌 API 快速参考
+
+FastAPI 提供完整 REST API 与自动文档：`http://localhost:8005/docs`
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/api/auth/login` | 登录获取 JWT |
+| `POST` | `/api/auth/phone/send-code` | 发送手机号验证码 (`register`/`reset`) |
+| `POST` | `/api/auth/phone/register` | 使用手机号注册并自动登录 |
+| `POST` | `/api/auth/phone/reset-password` | 通过手机号重置账号密码 |
+| `POST` | `/api/process` | 上传单张图片并开始处理 |
+| `GET` | `/api/task/{task_id}` | 查询任务状态 |
+| `GET` | `/api/download/{filename}` | 下载结果文件 |
+| `POST` | `/api/batch` | 批量任务创建 |
+| `GET` | `/api/batch/{batch_id}` | 查看批量任务进度 |
+
+示例：
+```bash
+# 登录获取 token
+curl -X POST http://localhost:8005/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin123"}'
+
+# 提交处理（使用上一步返回的 token）
+curl -X POST http://localhost:8005/api/process \
+  -H "Authorization: Bearer <token>" \
+  -F "file=@tests/sample_images/math.png" \
+  -F "llm_provider=gemini"
 ```
 
 ---
 
-## 🏗️ 方案2: FastAPI后端 + 前端
+## 📦 部署建议
 
-### 特点
-- ✅ RESTful API设计
-- ✅ 异步处理
-- ✅ 任务队列管理
-- ✅ 适合生产环境
-- ✅ 易于集成
-
-### 架构
-
-```
-┌─────────────┐      HTTP      ┌──────────────┐
-│   前端      │ ◄──────────────► │  FastAPI     │
-│  (可选)     │                  │   后端       │
-└─────────────┘                  └──────┬───────┘
-                                        │
-                                        ▼
-                                 ┌──────────────┐
-                                 │  OCR Engine  │
-                                 └──────────────┘
-```
-
-### 安装
-
+### Docker Compose
 ```bash
-cd web/backend
-pip install -r requirements.txt
-```
-
-### 启动后端
-
-```bash
-# 开发模式
-python app.py
-
-# 或使用uvicorn
-uvicorn app:app --reload --host 0.0.0.0 --port 8000
-```
-
-API文档: http://localhost:8000/docs
-
-### API端点
-
-#### 1. 获取模型列表
-
-```bash
-GET /api/models
-```
-
-响应:
-```json
-{
-  "models": [
-    {
-      "id": "gemini",
-      "name": "Gemini 1.5 Flash",
-      "accuracy": "88%",
-      "cost": "$0.35-1.05/1K",
-      "speed": "4-10s",
-      "recommended": true
-    }
-  ]
-}
-```
-
-#### 2. 处理单个图像
-
-```bash
-POST /api/process
-Content-Type: multipart/form-data
-
-file: <image_file>
-llm_provider: gemini
-include_original_image: true
-image_quality: 95
-```
-
-响应:
-```json
-{
-  "task_id": "uuid-here",
-  "status": "pending",
-  "message": "任务已提交"
-}
-```
-
-#### 3. 查询任务状态
-
-```bash
-GET /api/task/{task_id}
-```
-
-响应:
-```json
-{
-  "task_id": "uuid-here",
-  "status": "completed",
-  "progress": 100,
-  "message": "处理完成",
-  "result": {
-    "output_path": "output/file.docx",
-    "statistics": {
-      "total_formulas": 10
-    }
-  }
-}
-```
-
-#### 4. 下载文件
-
-```bash
-GET /api/download/{filename}
-```
-
-#### 5. 批量处理
-
-```bash
-POST /api/batch
-Content-Type: multipart/form-data
-
-files: [<file1>, <file2>, ...]
-llm_provider: gemini
-```
-
-#### 6. 查询批处理状态
-
-```bash
-GET /api/batch/{batch_id}
-```
-
-### 使用示例
-
-#### Python客户端
-
-```python
-import requests
-
-# 上传图像
-files = {'file': open('math.png', 'rb')}
-data = {'llm_provider': 'gemini'}
-
-response = requests.post(
-    'http://localhost:8000/api/process',
-    files=files,
-    data=data
-)
-
-task_id = response.json()['task_id']
-
-# 查询状态
-import time
-while True:
-    status = requests.get(f'http://localhost:8000/api/task/{task_id}')
-    result = status.json()
-    
-    if result['status'] == 'completed':
-        print(f"完成! 文件: {result['result']['output_path']}")
-        break
-    elif result['status'] == 'failed':
-        print(f"失败: {result['message']}")
-        break
-    
-    time.sleep(2)
-
-# 下载文件
-filename = result['result']['output_path'].split('/')[-1]
-file_response = requests.get(f'http://localhost:8000/api/download/{filename}')
-with open('output.docx', 'wb') as f:
-    f.write(file_response.content)
-```
-
-#### JavaScript客户端
-
-```javascript
-// 上传图像
-const formData = new FormData();
-formData.append('file', fileInput.files[0]);
-formData.append('llm_provider', 'gemini');
-
-const response = await fetch('http://localhost:8000/api/process', {
-    method: 'POST',
-    body: formData
-});
-
-const { task_id } = await response.json();
-
-// 轮询状态
-const checkStatus = async () => {
-    const statusResponse = await fetch(`http://localhost:8000/api/task/${task_id}`);
-    const status = await statusResponse.json();
-    
-    if (status.status === 'completed') {
-        console.log('完成!', status.result);
-        // 下载文件
-        window.location.href = `http://localhost:8000/api/download/${status.result.output_path.split('/').pop()}`;
-    } else if (status.status === 'failed') {
-        console.error('失败:', status.message);
-    } else {
-        setTimeout(checkStatus, 2000);
-    }
-};
-
-checkStatus();
-```
-
----
-
-## 🐳 Docker部署
-
-### Dockerfile
-
-```dockerfile
-FROM python:3.8-slim
-
-WORKDIR /app
-
-# 安装系统依赖
-RUN apt-get update && apt-get install -y \
-    poppler-utils \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
-
-# 复制依赖文件
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# 复制应用代码
-COPY . .
-
-# 创建必要目录
-RUN mkdir -p output logs uploads
-
-# 暴露端口
-EXPOSE 7860 8000
-
-# 启动命令 (可选择Gradio或FastAPI)
-CMD ["python", "web_app.py"]
-```
-
-### docker-compose.yml
-
-```yaml
-version: '3.8'
-
-services:
-  gradio:
-    build: .
-    ports:
-      - "7860:7860"
-    volumes:
-      - ./output:/app/output
-      - ./logs:/app/logs
-      - ./.env:/app/.env
-    environment:
-      - LOG_LEVEL=INFO
-    command: python web_app.py
-  
-  fastapi:
-    build: .
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./output:/app/output
-      - ./logs:/app/logs
-      - ./uploads:/app/uploads
-      - ./.env:/app/.env
-    environment:
-      - LOG_LEVEL=INFO
-    command: python web/backend/app.py
-```
-
-### 构建和运行
-
-```bash
-# 构建镜像
-docker build -t advanceocr .
-
-# 运行Gradio界面
-docker run -p 7860:7860 -v $(pwd)/.env:/app/.env advanceocr
-
-# 或使用docker-compose
-docker-compose up gradio
-
-# 运行FastAPI后端
 docker-compose up fastapi
+# 前端建议使用 Vercel/Netlify 或在服务器上运行 `npm run build && npm run preview`
 ```
 
----
-
-## 🚀 生产部署
-
-### Nginx配置
-
-```nginx
-server {
-    listen 80;
-    server_name your-domain.com;
-    
-    # Gradio
-    location / {
-        proxy_pass http://localhost:7860;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-    }
-    
-    # FastAPI
-    location /api {
-        proxy_pass http://localhost:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-}
-```
-
-### Systemd服务
-
-创建 `/etc/systemd/system/advanceocr.service`:
-
+### Systemd（后端示例）
 ```ini
-[Unit]
-Description=Advanced OCR Web Service
-After=network.target
-
 [Service]
 Type=simple
-User=www-data
-WorkingDirectory=/path/to/advanceOCR
-Environment="PATH=/path/to/venv/bin"
-ExecStart=/path/to/venv/bin/python web_app.py
-
-[Install]
-WantedBy=multi-user.target
+User=deploy
+WorkingDirectory=/opt/advanceOCR
+Environment="PATH=/opt/advanceOCR/.venv/bin"
+ExecStart=/opt/advanceOCR/.venv/bin/uvicorn web.backend.app:app --host 0.0.0.0 --port 8005
+Restart=on-failure
 ```
 
-启动服务:
+### 生产构建前端
 ```bash
-sudo systemctl enable advanceocr
-sudo systemctl start advanceocr
-sudo systemctl status advanceocr
+npm --prefix web/frontend run build
+npm --prefix web/frontend run preview -- --host 0.0.0.0 --port 4173
+```
+> 将 `dist/` 目录部署到任意静态站点（Nginx、Cloudflare Pages 等）。
+
+---
+
+## 🛠️ 常见问题排查
+
+| 问题 | 排查步骤 |
+|------|-----------|
+| 登录失败 | 确认 `config/users.yaml` 与服务器时间同步；查看 `logs/backend.log` |
+| 上传超时 | 检查前端网络/反向代理超时时间，确保后端可访问所需 API |
+| 文档空白 | 查看 `logs/advanceocr_*.log` 中的 LLM 响应与公式转换日志 |
+| 批量任务阻塞 | 查看 `/api/batch/{batch_id}` 状态，核对任务队列是否卡住 |
+
+---
+
+## 🗂️ 目录速览
+
+```
+web/
+├── backend/
+│   ├── app.py            # FastAPI 主程序
+│   ├── auth.py           # 认证逻辑
+│   ├── database.py       # 数据库连接（可选）
+│   └── redis_client.py   # Redis 客户端封装
+└── frontend/
+    ├── src/              # React 源代码
+    ├── package.json      # 前端依赖定义
+    └── vite.config.ts    # 构建配置
 ```
 
 ---
 
-## 🔒 安全建议
+## 📝 备注
 
-1. **API密钥保护**
-   - 不要在前端暴露API密钥
-   - 使用环境变量
-   - 定期轮换密钥
+- `.env` 文件仍用于配置默认 LLM、日志级别等参数
+- 运行 `./stop_services.sh` 可快速停止后台守护的前后端服务
+- 测试脚本已整理至 `tests/regression/` 目录
+- Bug 修复说明移动到 `docs/fixes/`
 
-2. **访问控制**
-   - 添加用户认证
-   - 限制上传文件大小
-   - 实施速率限制
-
-3. **HTTPS**
-   - 生产环境必须使用HTTPS
-   - 使用Let's Encrypt免费证书
-
-4. **文件安全**
-   - 验证上传文件类型
-   - 定期清理临时文件
-   - 限制文件访问权限
-
----
-
-## 📊 监控和日志
-
-### 日志查看
-
-```bash
-# Gradio日志
-tail -f logs/advanceocr_*.log
-
-# FastAPI日志
-tail -f logs/fastapi.log
-```
-
-### 性能监控
-
-使用Prometheus + Grafana监控:
-
-```python
-# 在FastAPI中添加metrics端点
-from prometheus_client import Counter, Histogram
-
-request_count = Counter('requests_total', 'Total requests')
-request_duration = Histogram('request_duration_seconds', 'Request duration')
-```
-
----
-
-## ❓ 常见问题
-
-### Q: Gradio界面无法访问?
-**A**: 检查防火墙设置,确保7860端口开放
-
-### Q: FastAPI返回500错误?
-**A**: 查看日志文件,检查API密钥配置
-
-### Q: 处理速度慢?
-**A**: 
-- 使用更快的模型 (Gemini Flash, Claude Haiku)
-- 启用图像压缩
-- 考虑使用GPU加速
-
-### Q: 如何添加认证?
-**A**: 
-```python
-# Gradio
-demo.launch(auth=("username", "password"))
-
-# FastAPI
-from fastapi.security import HTTPBasic
-```
-
----
-
-## 📚 更多资源
-
-- [Gradio文档](https://gradio.app/docs/)
-- [FastAPI文档](https://fastapi.tiangolo.com/)
-- [项目README](README.md)
-- [API文档](API.md)
-
----
-
-**更新日期:** 2024-01-XX
-
+> 如果需要回顾旧的 Gradio 工作流，请查阅 `WEB_DEPRECATION_SUMMARY.md` 与 `WEB_MIGRATION_GUIDE.md`。

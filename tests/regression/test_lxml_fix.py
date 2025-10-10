@@ -3,6 +3,7 @@
 测试 lxml 修复
 """
 import sys
+from pathlib import Path
 import yaml
 import logging
 
@@ -12,12 +13,18 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
+ROOT_DIR = Path(__file__).resolve().parents[2]
+CONFIG_PATH = ROOT_DIR / 'config' / 'config.yaml'
+
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from src.document_generator import DocumentGenerator
 from src.formula_converter import FormulaConverter
 from docx import Document
 
 # 加载配置
-with open('config/config.yaml', 'r', encoding='utf-8') as f:
+with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
     config = yaml.safe_load(f)
 
 # 创建实例

@@ -1,0 +1,89 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: ocr_postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME:-ocr_db}
+      POSTGRES_USER: ${DB_USER:-ocr_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-ocr_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-ocr_user}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ocr_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: ocr_redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - ocr_network
+
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    container_name: ocr_backend
+    env_file:
+      - ../.env
+    environment:
+      - DB_HOST=${DB_HOST:-postgres}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-ocr_db}
+      - DB_USER=${DB_USER:-ocr_user}
+      - DB_PASSWORD=${DB_PASSWORD:-ocr_password}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - AUTH_SECRET_KEY=${AUTH_SECRET_KEY:-change-me-in-production}
+    volumes:
+      - ../uploads:/app/uploads
+      - ../output:/app/output
+      - ../logs:/app/logs
+    ports:
+      - "8005:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ocr_network
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.frontend
+    container_name: ocr_frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    networks:
+      - ocr_network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  ocr_network:
+    driver: bridge

@@ -137,22 +137,22 @@ if not is_valid:
 
 ##### process_image()
 
-处理图像文件,返回PIL Image对象列表。
+处理图像文件,根据配置自动切分,并返回分片列表及原始图像。
 
 ```python
-process_image(image_path: str) -> List[Image.Image]
+process_image(image_path: str) -> Tuple[List[Image.Image], Image.Image]
 ```
 
 **参数:**
 - `image_path` (str): 图像文件路径
 
 **返回:**
-- List[Image.Image]: PIL Image对象列表 (PDF可能有多页)
+- Tuple[List[Image.Image], Image.Image]: (预处理后的图像分片列表, 原始图像)
 
 **示例:**
 ```python
-images = processor.process_image('document.pdf')
-print(f"处理了 {len(images)} 页")
+processed_segments, original = processor.process_image('document.pdf')
+print(f"生成 {len(processed_segments)} 个分片，原始尺寸: {original.size}")
 ```
 
 ##### image_to_base64()
@@ -516,4 +516,3 @@ if is_valid:
 - [README.md](README.md) - 使用说明
 - [example.py](example.py) - 示例代码
 - 源代码注释
-

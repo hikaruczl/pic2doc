@@ -40,15 +40,8 @@ case "$MODE" in
   backend)
     stop_target "web/backend/app.py" "backend service"
     ;;
-  web)
-    stop_target "web_app.py" "web service"
-    ;;
-  all)
-    stop_target "web/backend/app.py" "backend service"
-    stop_target "web_app.py" "web service"
-    ;;
   *)
-    echo "Usage: $0 [backend|web|all]" >&2
+    echo "Usage: $0 [backend]" >&2
     exit 1
     ;;
 esac

@@ -79,52 +79,12 @@ run_backend() {
     "$PYTHON_BIN" web/backend/app.py "$@"
 }
 
-run_web() {
-  exec env \
-    http_proxy= \
-    https_proxy= \
-    HTTP_PROXY= \
-    HTTPS_PROXY= \
-    ALL_PROXY= \
-    all_proxy= \
-    NO_PROXY= \
-    no_proxy= \
-    "$PYTHON_BIN" web_app.py "$@"
-}
-
 case "$MODE" in
   backend)
     run_backend "$@"
     ;;
-  web)
-    run_web "$@"
-    ;;
-  all)
-    env \
-      http_proxy= \
-      https_proxy= \
-      HTTP_PROXY= \
-      HTTPS_PROXY= \
-      ALL_PROXY= \
-      all_proxy= \
-      NO_PROXY= \
-      no_proxy= \
-      "$PYTHON_BIN" web/backend/app.py "$@" &
-    BACKEND_PID=$!
-    trap 'kill "$BACKEND_PID" >/dev/null 2>&1 || true' EXIT
-    exec env \
-      http_proxy= \
-      https_proxy= \
-      HTTP_PROXY= \
-      HTTPS_PROXY= \
-      ALL_PROXY= \
-      all_proxy= \
-      NO_PROXY= \
-      no_proxy= \
-      "$PYTHON_BIN" web_app.py "$@"
-    ;;
   *)
-    echo "Usage: $0 [backend|web|all] [-- additional-args]" >&2
+    echo "Usage: $0 [backend] [-- additional-args]" >&2
     exit 1
     ;;
 esac

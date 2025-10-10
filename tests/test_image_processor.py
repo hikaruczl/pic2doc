@@ -89,9 +89,10 @@ class TestImageProcessor:
             sample_image.save(temp_path)
         
         try:
-            images = image_processor.process_image(temp_path)
-            assert len(images) == 1
+            images, original = image_processor.process_image(temp_path)
+            assert len(images) >= 1
             assert isinstance(images[0], Image.Image)
+            assert isinstance(original, Image.Image)
         finally:
             os.unlink(temp_path)
     
@@ -141,4 +142,3 @@ class TestImageProcessor:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
-

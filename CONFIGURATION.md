@@ -114,6 +114,21 @@ LOG_LEVEL=INFO
 - `LOG_DIR`: 日志文件目录
 - `LOG_LEVEL`: 日志级别 (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`)
 
+### 手机验证码设置
+
+```env
+PHONE_CODE_LENGTH=6
+PHONE_CODE_TTL_SECONDS=300
+PHONE_CODE_RESEND_SECONDS=60
+AUTH_DEBUG_PHONE_CODE=false
+```
+
+**说明:**
+- `PHONE_CODE_LENGTH`: 验证码长度 (位数)
+- `PHONE_CODE_TTL_SECONDS`: 验证码有效期 (秒)
+- `PHONE_CODE_RESEND_SECONDS`: 再次发送验证码前的最短间隔 (秒)
+- `AUTH_DEBUG_PHONE_CODE`: 当设为 `true/1` 时，接口会返回 `debug_code` 字段，便于测试环境查看验证码
+
 ---
 
 ## YAML配置文件 (config/config.yaml)
@@ -404,4 +419,3 @@ llm:
 - [README.md](README.md)
 - [API.md](API.md)
 - [example.py](example.py)
-

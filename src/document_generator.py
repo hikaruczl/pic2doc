@@ -115,9 +115,9 @@ class DocumentGenerator:
     def _set_document_properties(self, doc: Document, metadata: Optional[Dict]):
         """设置文档属性"""
         core_properties = doc.core_properties
-        core_properties.author = "Advanced OCR System"
-        core_properties.title = "Math Problem Analysis"
-        
+        core_properties.author = "图像转Word系统"
+        core_properties.title = "数学问题分析"
+
         if metadata:
             if 'title' in metadata:
                 core_properties.title = metadata['title']
@@ -197,6 +197,7 @@ class DocumentGenerator:
             
             # 添加行内公式
             latex = match.group(1).strip()
+            latex = self._normalize_inline_latex(latex)
             try:
                 mathml = latex_to_mathml(latex)
                 self._insert_mathml(paragraph, mathml)
@@ -220,23 +221,41 @@ class DocumentGenerator:
             run = paragraph.add_run(text)
             run.font.size = Pt(self.doc_config.get('default_font_size', 11))
             run.font.name = self.doc_config.get('default_font', 'Arial')
-    
+
+    @staticmethod
+    def _normalize_inline_latex(latex: str) -> str:
+        """将形如 f' 或 f'' 等用 prime 表示的记号转换为标准LaTeX"""
+        import re
+
+        def repl(match: re.Match) -> str:
+            base = match.group(1)
+            primes = match.group(2)
+            # 生成正确的上标格式: f^{\prime} 或 f^{\prime\prime}
+            prime_str = "\\prime" * len(primes)
+            return f"{base}^{{{prime_str}}}"
+
+        # 匹配字母后跟1-4个单引号，但要确保单引号后不是LaTeX命令的一部分
+        # 使用负向前瞻避免匹配 f'\text{...} 这样的情况
+        converted = re.sub(r"([A-Za-z])('{1,4})(?![a-zA-Z])", repl, latex)
+        return converted
+
     def _add_formula(self, doc: Document, element: Dict):
         """添加公式"""
         formula_type = element['formula_type']
         latex = element['latex']
         mathml = element['mathml']
-        
+
         # 创建段落
         paragraph = doc.add_paragraph()
-        
+        paragraph.style = 'Normal'
+
+        # 显示公式的日志
         if formula_type == 'display':
-            # 居中显示公式
-            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
+            logger.info(f"准备插入显示公式: {latex[:50]}...")
+
         # 尝试插入MathML
         try:
-            self._insert_mathml(paragraph, mathml)
+            self._insert_mathml(paragraph, mathml, is_display=(formula_type == 'display'))
         except Exception as e:
             logger.warning(f"插入MathML失败,使用LaTeX文本: {str(e)}")
             logger.debug(f"LaTeX: {latex[:100]}...")
@@ -246,23 +265,50 @@ class DocumentGenerator:
             run.font.name = 'Courier New'
             run.font.size = Pt(10)
     
-    def _insert_mathml(self, paragraph, mathml: str):
+    def _insert_mathml(self, paragraph, mathml: str, is_display: bool = False):
         """
         插入MathML到段落
-        
+
         Args:
             paragraph: 段落对象
             mathml: MathML字符串
+            is_display: 是否是显示公式
         """
         from lxml import etree
-        
+
         # 转换MathML为OMML
         omml_element = self._convert_mathml_to_omml(mathml)
-        
+
         if omml_element is not None:
-            # 插入OMML到段落
-            run = paragraph.add_run()
-            run._element.append(omml_element)
+            if is_display:
+                # 显示公式需要使用oMathPara包装，直接添加到段落元素中（不是run）
+                # 这是Word正确显示独立公式的必需结构
+                MATH_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
+
+                # 创建oMathPara元素（display math容器）
+                omath_para = etree.Element('{%s}oMathPara' % MATH_NS, nsmap={'m': MATH_NS})
+
+                # 创建oMathParaPr（display math段落属性）
+                omath_para_pr = etree.SubElement(omath_para, '{%s}oMathParaPr' % MATH_NS)
+
+                # 添加左对齐设置到oMathParaPr
+                jc = etree.SubElement(omath_para_pr, '{%s}jc' % MATH_NS)
+                jc.set('{%s}val' % MATH_NS, 'left')
+
+                # 将oMath元素添加到oMathPara中
+                omath_para.append(omml_element)
+
+                # 关键：直接添加oMathPara到段落元素（不通过run）
+                # 这是display math和inline math的关键区别
+                paragraph._element.append(omath_para)
+
+                logger.info(f"显示公式已插入（使用oMathPara左对齐）")
+            else:
+                # 行内公式：插入到run中（这是正确的inline math结构）
+                run = paragraph.add_run()
+                run._element.append(omml_element)
+
+                logger.debug(f"行内公式已插入")
         else:
             raise Exception("MathML to OMML conversion failed")
     
@@ -311,69 +357,69 @@ class DocumentGenerator:
     def _convert_mathml_element_to_omml(self, mathml_elem, omml_parent):
         """
         递归转换MathML元素为OMML元素
-        
+
         Args:
             mathml_elem: MathML lxml元素
             omml_parent: OMML lxml父元素
         """
         from lxml import etree
-        
+
         MATH_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
-        
+
         # 获取标签名(去除命名空间)
         tag = mathml_elem.tag.split('}')[-1] if '}' in mathml_elem.tag else mathml_elem.tag
-        
+
         # 处理不同的MathML标签
         if tag == 'math':
             # 根元素,处理子元素
             for child in mathml_elem:
                 self._convert_mathml_element_to_omml(child, omml_parent)
-        
+
         elif tag == 'mrow':
             # 行,处理子元素
             for child in mathml_elem:
                 self._convert_mathml_element_to_omml(child, omml_parent)
-        
+
         elif tag in ['mi', 'mn', 'mo', 'mtext']:
             # 标识符、数字、运算符、文本
             r = etree.SubElement(omml_parent, '{%s}r' % MATH_NS)
             t = etree.SubElement(r, '{%s}t' % MATH_NS)
             text = mathml_elem.text or ''
             t.text = text
-            
+
         elif tag == 'mfrac':
             # 分数
             f = etree.SubElement(omml_parent, '{%s}f' % MATH_NS)
             num = etree.SubElement(f, '{%s}num' % MATH_NS)
             den = etree.SubElement(f, '{%s}den' % MATH_NS)
-            
+
             children = list(mathml_elem)
             if len(children) >= 2:
                 self._convert_mathml_element_to_omml(children[0], num)
                 self._convert_mathml_element_to_omml(children[1], den)
-        
+
         elif tag == 'msup':
             # 上标
             ssup = etree.SubElement(omml_parent, '{%s}sSup' % MATH_NS)
             e = etree.SubElement(ssup, '{%s}e' % MATH_NS)
             sup = etree.SubElement(ssup, '{%s}sup' % MATH_NS)
-            
+
             children = list(mathml_elem)
             if len(children) >= 2:
                 self._convert_mathml_element_to_omml(children[0], e)
                 self._convert_mathml_element_to_omml(children[1], sup)
-        
+
         elif tag == 'msub':
             # 下标
             ssub = etree.SubElement(omml_parent, '{%s}sSub' % MATH_NS)
             e = etree.SubElement(ssub, '{%s}e' % MATH_NS)
             sub = etree.SubElement(ssub, '{%s}sub' % MATH_NS)
-            
+
             children = list(mathml_elem)
             if len(children) >= 2:
                 self._convert_mathml_element_to_omml(children[0], e)
                 self._convert_mathml_element_to_omml(children[1], sub)
-        
+
         elif tag == 'msqrt':
             # 平方根
             rad = etree.SubElement(omml_parent, '{%s}rad' % MATH_NS)
@@ -381,21 +427,55 @@ class DocumentGenerator:
             degHide = etree.SubElement(radPr, '{%s}degHide' % MATH_NS)
             degHide.set('{%s}val' % MATH_NS, '1')
             e = etree.SubElement(rad, '{%s}e' % MATH_NS)
-            
+
             for child in mathml_elem:
                 self._convert_mathml_element_to_omml(child, e)
-        
+
         elif tag == 'mroot':
             # n次根
             rad = etree.SubElement(omml_parent, '{%s}rad' % MATH_NS)
             deg = etree.SubElement(rad, '{%s}deg' % MATH_NS)
             e = etree.SubElement(rad, '{%s}e' % MATH_NS)
-            
+
             children = list(mathml_elem)
             if len(children) >= 2:
                 self._convert_mathml_element_to_omml(children[0], e)
                 self._convert_mathml_element_to_omml(children[1], deg)
-        
+
+        elif tag == 'mtable':
+            # 表格结构(用于aligned/gathered环境)
+            # OMML中使用eqArr(方程组数组)来表示
+            eqArr = etree.SubElement(omml_parent, '{%s}eqArr' % MATH_NS)
+
+            # 处理每一行
+            for row in mathml_elem:
+                row_tag = row.tag.split('}')[-1] if '}' in row.tag else row.tag
+                if row_tag == 'mtr':  # 表格行
+                    e = etree.SubElement(eqArr, '{%s}e' % MATH_NS)
+
+                    # 处理行中的单元格
+                    for cell in row:
+                        cell_tag = cell.tag.split('}')[-1] if '}' in cell.tag else cell.tag
+                        if cell_tag == 'mtd':  # 表格单元格
+                            for child in cell:
+                                self._convert_mathml_element_to_omml(child, e)
+
+        elif tag == 'mtr':
+            # 表格行(如果直接遇到,不在mtable中)
+            for child in mathml_elem:
+                self._convert_mathml_element_to_omml(child, omml_parent)
+
+        elif tag == 'mtd':
+            # 表格单元格(如果直接遇到,不在mtr中)
+            for child in mathml_elem:
+                self._convert_mathml_element_to_omml(child, omml_parent)
+
+        elif tag == 'mspace':
+            # 空格 - 在OMML中添加空文本
+            r = etree.SubElement(omml_parent, '{%s}r' % MATH_NS)
+            t = etree.SubElement(r, '{%s}t' % MATH_NS)
+            t.text = ' '
+
         else:
             # 未处理的标签,尝试处理子元素
             logger.debug(f"未处理的MathML标签: {tag}")
@@ -406,16 +486,13 @@ class DocumentGenerator:
         """添加页脚"""
         # 添加分隔线
         doc.add_paragraph('_' * 50)
-        
+
         # 添加生成信息
         footer_text = f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        
-        if metadata and 'provider' in metadata:
-            footer_text += f" | 使用模型: {metadata['provider']}"
-        
+
         footer = doc.add_paragraph(footer_text)
         footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
+
         run = footer.runs[0]
         run.font.size = Pt(8)
         run.font.color.rgb = RGBColor(128, 128, 128)
@@ -448,4 +525,3 @@ class DocumentGenerator:
         filepath = self.save_document(doc)
         
         return filepath
-

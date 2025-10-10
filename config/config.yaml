@@ -22,9 +22,16 @@ llm:
     temperature: 0.1
 
   qwen:
-    model: "qwen-vl-plus"  # qwen-vl-plus or qwen-vl-max
+    model: "qwen3-vl-plus"  # qwen3-vl-plus or qwen3-vl-max
     max_tokens: 4096
     temperature: 0.1
+
+  # LLM请求超时时间(秒)
+  request_timeout_seconds: 600
+
+  concurrency:
+    enable: true
+    max_parallel_requests: 3
 
   retry:
     max_attempts: 3
@@ -39,12 +46,44 @@ image:
     - jpg
     - jpeg
     - pdf
-  quality: 95
+  quality: 90
+  base64_format: "jpeg"   # jpeg, png, webp
+  base64_quality: 85
+  base64_max_bytes: 3145728  # 3MB 上限, 超过会自动压缩/缩放
   preprocessing:
     resize_if_large: true
-    max_dimension: 2048
+    max_dimension: 1600
     enhance_contrast: false
     denoise: false
+  slicing:
+    enable: true
+    min_height: 2200
+    aspect_ratio_threshold: 2.0
+    target_height: 1100
+    min_segment_height: 700
+    overlap: 160  # 固定overlap模式下使用（当adaptive_overlap.enable=false时）
+    whitespace_window: 150
+    whitespace_density_threshold: 0.08
+    max_segments: 0  # 0 表示不限制切片数量
+
+    # 自适应overlap配置（根据切分点质量动态调整overlap大小）
+    adaptive_overlap:
+      enable: true  # 是否启用自适应overlap
+      excellent_threshold: 0.05  # 极佳切分点阈值（内容密度 <= 0.05视为完全空白）
+      good_threshold: 0.10       # 良好切分点阈值（内容密度 <= 0.10视为较空白）
+      excellent_overlap: 0       # 极佳切分点使用的overlap（px）
+      good_overlap: 30           # 良好切分点使用的overlap（px）
+      default_overlap: 160       # 默认overlap（在内容区域切分时使用）
+
+    debug:
+      save_segments: true
+      output_dir: "logs/segments"
+      clear_before_save: true
+    page_break_detection:
+      enable: true
+      whiteness_threshold: 0.97
+      min_blank_height: 180
+      margin_ratio: 0.04
 
 # Formula Conversion Settings
 formula:
@@ -106,4 +145,3 @@ performance:
   parallel_processing: false
   cache_api_responses: false
   cache_ttl_hours: 24
-

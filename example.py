@@ -130,8 +130,8 @@ def example_component_usage():
         print(f"   图像验证: {'✓ 有效' if is_valid else f'✗ 无效 - {error}'}")
         
         if is_valid:
-            images = image_processor.process_image(image_path)
-            print(f"   处理完成: {len(images)} 张图像")
+            processed_images, original_image = image_processor.process_image(image_path)
+            print(f"   处理完成: {len(processed_images)} 张图像分片，原图尺寸: {original_image.size}")
     
     # 2. 使用公式转换器
     print("\n2. 公式转换器")
@@ -222,4 +222,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

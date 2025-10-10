@@ -1,0 +1,28 @@
+services:
+  postgres:
+    extends:
+      file: docker-compose.components.yml
+      service: postgres
+
+  redis:
+    extends:
+      file: docker-compose.components.yml
+      service: redis
+
+  backend:
+    extends:
+      file: docker-compose.components.yml
+      service: backend
+
+  frontend:
+    extends:
+      file: docker-compose.components.yml
+      service: frontend
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  ocr_network:
+    driver: bridge

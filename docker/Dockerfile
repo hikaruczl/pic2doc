@@ -1,15 +1,13 @@
-# Advanced OCR Dockerfile
+# Dockerfile for OCR Backend
 FROM python:3.11-slim
 
-# 设置工作目录
+# Set working directory
 WORKDIR /app
 
-# 安装系统依赖
-# 换阿里云 Debian 源
-# 新版 Debian 使用 deb822 格式
-RUN sed -i 's|http://deb.debian.org|https://mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources && \
+# Install system dependencies (mirror for faster build)
+RUN sed -i 's|http://deb.debian.org|https://mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources || true && \
     apt-get update && \
-    apt-get install -y \
+    apt-get install -y --no-install-recommends \
         poppler-utils \
         libpq-dev \
         gcc \
@@ -28,29 +26,23 @@ RUN sed -i 's|http://deb.debian.org|https://mirrors.aliyun.com|g' /etc/apt/sourc
         libglib2.0-0 && \
     rm -rf /var/lib/apt/lists/*
 
-# 配置国内PyPI源和下载超时
+# Configure faster PyPI mirror and timeout
 ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple \
     PIP_TRUSTED_HOST=mirrors.aliyun.com \
     PIP_DEFAULT_TIMEOUT=120
 
-# 复制requirements文件
-COPY requirements.txt .
-
-# 安装Python依赖
+# Copy requirements first for better caching
+COPY requirements.txt ./
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
-# 复制应用代码
+# Copy application code
 COPY . .
 
-# 创建必要的目录
-RUN mkdir -p output logs uploads tests/sample_images
+# Create necessary directories
+RUN mkdir -p uploads output logs
 
-# 设置环境变量
-ENV PYTHONUNBUFFERED=1
-ENV LOG_LEVEL=INFO
+# Expose backend port
+EXPOSE 8000
 
-# 暴露 FastAPI 端口
-EXPOSE 8005
-
-# 默认启动 FastAPI 后端
-CMD ["python", "web/backend/app.py"]
+# Run the application
+CMD ["python", "-m", "uvicorn", "web.backend.app:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -9,7 +9,7 @@
 - 📐 **公式识别**: 自动识别并转换数学公式为LaTeX和MathML格式
 - 📄 **Word生成**: 生成包含公式、文本和图像的完整Word文档
 - 🔄 **批量处理**: 支持批量处理多个图像文件
-- 🌐 **Web界面**: 提供Gradio和FastAPI两种Web界面方案
+- 🌐 **Web界面**: 提供 React 前端与 FastAPI 后端 API
 - 🛡️ **错误处理**: 完善的错误处理和重试机制
 - 📊 **日志系统**: 详细的日志记录和彩色控制台输出
 
@@ -130,38 +130,72 @@ FALLBACK_LLM_PROVIDER=anthropic
 - 文档格式设置
 - 日志配置
 
+### 4. 登录与认证
+
+- 在 `.env` 中设置 `AUTH_SECRET_KEY` (32位以上随机字符串更安全), 可选地自定义 `AUTH_TOKEN_EXPIRE_MINUTES`
+- 按需设置 `AUTH_TOKEN_RENEW_THRESHOLD_MINUTES` (默认15分钟)，当剩余有效期低于该阈值时会自动续签
+- 现已支持 **手机号注册与找回密码**：
+  - 新接口：`/api/auth/phone/send-code`、`/api/auth/phone/register`、`/api/auth/phone/reset-password`
+  - 配置验证码参数：`PHONE_CODE_LENGTH`、`PHONE_CODE_TTL_SECONDS`、`PHONE_CODE_RESEND_SECONDS`、`AUTH_DEBUG_PHONE_CODE`
+  - 数据库需要在 `users` 表中新增唯一手机号列：
+
+    ```sql
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(32) UNIQUE;
+    ```
+
+  - 前端登录页已提供「手机号注册」和「找回密码」入口，支持获取验证码并完成自动登录
+- 编辑 `config/users.yaml` 可继续维护管理员或预置账号。示例文件包含默认账号 `admin`/`admin123`
+- 密码需要使用 `sha256$<hashed>` 格式存储。可通过以下命令生成:
+
+```bash
+python - <<'PY'
+import hashlib
+print('sha256$' + hashlib.sha256('your_password'.encode()).hexdigest())
+PY
+```
+
+- 修改完成后重启服务使配置生效
+- 访问受保护接口时，服务会在响应头 `X-Access-Token` / `X-Token-Expires-In` 中返回续签令牌与剩余秒数，前端会自动更新
+
 ## 🚀 使用方法
 
 ### 🌐 Web界面使用 (推荐)
 
-#### 方式1: Gradio界面 (最简单)
+#### 现代化React界面 (推荐)
+
+使用服务脚本一键启动:
 
 ```bash
-# 启动Web界面
-python web_app.py
+# 启动所有服务(后端 + 前端)
+./start_services.sh
 ```
 
-访问: http://localhost:7860
+或手动启动:
 
-- ✅ 零配置,开箱即用
-- ✅ 美观的现代化界面
-- ✅ 支持拖拽上传
+```bash
+# 1. 启动FastAPI后端
+python web/backend/app.py
+# API文档: http://localhost:8000/docs
+
+# 2. 启动React前端 (在另一个终端)
+cd web/frontend
+npm install  # 首次运行需要
+npm run dev
+# 访问: http://localhost:5173
+```
+
+特性:
+- ✅ 现代化的React界面
+- ✅ RESTful API设计
+- ✅ 用户认证和授权
+- ✅ 异步任务处理
 - ✅ 实时进度显示
+
+> 首次访问需要使用 `config/users.yaml` 中的账号登录获取令牌
 
 详见: [WEB_GUIDE.md](WEB_GUIDE.md)
 
-#### 方式2: FastAPI后端
-
-```bash
-# 启动API服务
-python web/backend/app.py
-```
-
-API文档: http://localhost:8000/docs
-
-- ✅ RESTful API设计
-- ✅ 异步处理
-- ✅ 适合集成
+> ℹ️ 旧版 Gradio 界面已从项目中移除，如需了解历史迁移背景可参考 `WEB_DEPRECATION_SUMMARY.md`。
 
 ### 命令行使用
 
@@ -247,9 +281,9 @@ python example.py
 - 验证图像文件
 - 返回: (是否有效, 错误信息)
 
-**`process_image(image_path: str) -> List[Image.Image]`**
-- 处理图像文件
-- 返回: PIL Image对象列表
+**`process_image(image_path: str) -> Tuple[List[Image.Image], Image.Image]`**
+- 处理图像文件,根据配置自动切分长图
+- 返回: (`预处理后的图像分片列表`, `原始图像`)
 
 ### LLMClient 类
 
@@ -314,6 +348,8 @@ pytest --cov=src tests/
 advanceOCR/
 ├── config/
 │   └── config.yaml          # 配置文件
+├── docs/                    # 项目文档
+│   └── fixes/               # Bug修复说明文档
 ├── src/
 │   ├── __init__.py
 │   ├── image_processor.py   # 图像预处理
@@ -321,16 +357,34 @@ advanceOCR/
 │   ├── formula_converter.py # 公式格式转换
 │   ├── document_generator.py# Word文档生成
 │   └── main.py              # 主程序入口
+├── web/
+│   ├── backend/             # FastAPI后端
+│   │   ├── app.py           # API端点
+│   │   └── auth.py          # 认证逻辑
+│   └── frontend/            # React前端
+│       ├── src/             # 源代码
+│       ├── package.json     # 依赖配置
+│       └── vite.config.ts   # Vite配置
 ├── tests/
+│   ├── __init__.py
+│   ├── sample_images/       # 测试图片
 │   ├── test_image_processor.py
 │   ├── test_formula_converter.py
-│   └── sample_images/       # 测试图片
-├── output/                  # 输出目录
-├── logs/                    # 日志目录
-├── .env.example             # 环境变量模板
-├── requirements.txt         # 依赖列表
+│   └── regression/          # 回归测试脚本
+│       ├── test_fixes.py
+│       ├── test_fixes_lite.py
+│       ├── test_format_conversion.py
+│       ├── test_formula_fix.py
+│       ├── test_lxml_fix.py
+│       ├── test_omml_conversion.py
+│       ├── test_three_issues.py
+│       └── test_three_issues_lite.py
+├── output/                  # 生成的Word文档
+├── logs/                    # 应用日志
 ├── example.py               # 使用示例
-└── README.md                # 本文件
+├── start_services.sh        # 启动服务脚本
+├── stop_services.sh         # 停止服务脚本
+└── .env                     # 环境变量(不在repo中)
 ```
 
 ## 🔧 技术栈
@@ -384,4 +438,3 @@ MIT License
 ## 📧 联系方式
 
 如有问题或建议,请通过Issue联系我们。
-

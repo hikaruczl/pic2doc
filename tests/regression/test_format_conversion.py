@@ -14,11 +14,12 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 
-# 添加src目录到路径
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
-from formula_converter import FormulaConverter
-from document_generator import DocumentGenerator
+from src.formula_converter import FormulaConverter
+from src.document_generator import DocumentGenerator
 
 
 def setup_logging():
@@ -31,7 +32,7 @@ def setup_logging():
 
 def load_config():
     """加载配置文件"""
-    config_path = os.path.join(os.path.dirname(__file__), 'config', 'config.yaml')
+    config_path = ROOT_DIR / 'config' / 'config.yaml'
     with open(config_path, 'r', encoding='utf-8') as f:
         return yaml.safe_load(f)
 

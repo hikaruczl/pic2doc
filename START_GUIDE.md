@@ -10,9 +10,13 @@
 
 ### 方式一:前台运行(带日志)
 ```bash
-./scripts/start_uv.sh all
+# 启动后端 (终端1)
+./scripts/start_uv.sh backend
+
+# 启动前端 (终端2)
+npm --prefix web/frontend run dev -- --host 0.0.0.0 --port 5173
 ```
-按 `Ctrl+C` 停止服务
+按 `Ctrl+C` 停止对应服务
 
 ### 方式二:后台运行(推荐)
 ```bash
@@ -29,7 +33,7 @@ tail -f logs/web.log      # Web UI日志
 
 ## 服务地址
 
-- **Web UI (Gradio)**: http://localhost:7860
+- **Web UI (React)**: http://localhost:5173
 - **Backend API (FastAPI)**: http://localhost:8005
 - **API文档**: http://localhost:8005/docs
 
@@ -46,7 +50,7 @@ tail -f logs/web.log      # Web UI日志
 
 3. **启动服务**:
    - Backend API (FastAPI + Uvicorn)
-   - Web UI (Gradio)
+   - Web UI (React + Vite)
 
 ## 环境变量
 
@@ -65,6 +69,12 @@ FALLBACK_LLM_PROVIDER=qwen
 
 # UV设置(可选)
 export UV_LINK_MODE=copy  # 避免硬链接警告
+
+# 手机验证码配置
+PHONE_CODE_LENGTH=6
+PHONE_CODE_TTL_SECONDS=300
+PHONE_CODE_RESEND_SECONDS=60
+AUTH_DEBUG_PHONE_CODE=false
 ```
 
 ## 常见问题
@@ -76,7 +86,7 @@ export UV_LINK_MODE=copy  # 避免硬链接警告
 **解决**:
 ```bash
 # 查找并停止占用端口的进程
-lsof -ti:7860 | xargs kill -9
+lsof -ti:5173 | xargs kill -9
 lsof -ti:8005 | xargs kill -9
 ```
 
@@ -86,7 +96,7 @@ lsof -ti:8005 | xargs kill -9
 ```bash
 # 删除虚拟环境重新创建
 rm -rf .venv
-./scripts/start_uv.sh all
+./scripts/start_uv.sh backend
 ```
 
 ### 3. 硬链接警告
@@ -119,11 +129,11 @@ export UV_LINK_MODE=copy
 
 ```bash
 # 查看服务进程
-ps aux | grep "web/backend/app.py\|web_app.py"
+ps aux | grep "web/backend/app.py"
 
 # 测试API是否可用
 curl http://localhost:8005/health  # Backend
-curl http://localhost:7860         # Web UI
+curl -I http://localhost:5173      # React Web UI (开发模式)
 
 # 实时查看日志
 tail -f logs/advanceocr_*.log
@@ -138,7 +148,7 @@ tail -f logs/advanceocr_*.log
 uvicorn web.backend.app:app --reload --host 0.0.0.0 --port 8005
 
 # 只启动Web界面
-python web_app.py
+npm --prefix web/frontend run dev -- --host 0.0.0.0 --port 5173
 ```
 
 ## 生产部署

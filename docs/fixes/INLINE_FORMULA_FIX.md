@@ -192,7 +192,7 @@ run._element.append(omml_element)
 
 ```bash
 # 直接使用，自动正确处理
-.venv/bin/python test_format_conversion.py -f your_text.txt -o output.docx
+.venv/bin/python tests/regression/test_format_conversion.py -f your_text.txt -o output.docx
 ```
 
 ## 兼容性
@@ -234,7 +234,7 @@ except Exception as e:
 
 - `src/formula_converter.py` - 公式解析逻辑
 - `src/document_generator.py` - 文档生成和公式渲染
-- `test_format_conversion.py` - 测试工具
+- `tests/regression/test_format_conversion.py` - 测试工具
 - `log_text` - 测试用例（纯行内公式）
 - `sample_text.txt` - 测试用例（混合公式）
 

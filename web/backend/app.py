@@ -7,31 +7,93 @@ import os
 import sys
 import uuid
 import asyncio
+import logging
 from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    Response,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
-import yaml
 from dotenv import load_dotenv
 
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.main import AdvancedOCR
+from web.backend.auth import (
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+    authenticate_user,
+    compute_expires_in,
+    create_access_token,
+    decode_access_token,
+    get_user,
+    get_user_by_phone_number,
+    normalize_phone_number,
+    register_user_with_phone,
+    reset_password_with_phone,
+    send_phone_verification_code,
+    should_refresh_token,
+    validate_phone_number,
+    verify_phone_code,
+    PHONE_PURPOSE_REGISTER,
+    PHONE_PURPOSE_RESET,
+)
+from web.backend.database import init_db_pool, close_db_pool
+from web.backend.redis_client import init_redis_client, close_redis_client
 
 # 加载环境变量
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
+DEBUG_PHONE_CODE = os.getenv("AUTH_DEBUG_PHONE_CODE", "false").lower() in {"1", "true", "yes"}
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan manager for startup and shutdown events."""
+    # Startup
+    logger.info("Initializing database connection pool...")
+    init_db_pool()
+
+    logger.info("Initializing Redis client...")
+    init_redis_client()
+
+    logger.info("Application startup complete")
+
+    yield
+
+    # Shutdown
+    logger.info("Closing database connection pool...")
+    close_db_pool()
+
+    logger.info("Closing Redis client...")
+    close_redis_client()
+
+    logger.info("Application shutdown complete")
+
+
 # 创建FastAPI应用
 app = FastAPI(
-    title="Advanced OCR API",
-    description="数学问题图像转Word文档API",
-    version="1.0.0"
+    title="图像转Word API",
+    description="智能识别数学公式，生成Word文档",
+    version="1.0.0",
+    lifespan=lifespan,
 )
+
+security = HTTPBearer(auto_error=False)
 
 # 配置CORS
 app.add_middleware(
@@ -47,6 +109,61 @@ ocr = AdvancedOCR()
 
 # 任务存储 (生产环境应使用数据库)
 tasks = {}
+
+
+class LoginRequest(BaseModel):
+    """登录请求模型"""
+
+    username: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    """访问令牌响应模型"""
+
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+
+
+class UserProfile(BaseModel):
+    """已登录用户信息"""
+
+    username: str
+    full_name: Optional[str] = None
+
+
+class PhoneCodeRequest(BaseModel):
+    """手机验证码请求模型"""
+
+    phone: str
+    purpose: str = PHONE_PURPOSE_REGISTER
+
+
+class PhoneCodeResponse(BaseModel):
+    """验证码发送响应"""
+
+    message: str
+    ttl: int
+    debug_code: Optional[str] = None
+
+
+class PhoneRegisterRequest(BaseModel):
+    """手机号注册请求模型"""
+
+    phone: str
+    code: str
+    password: str
+    username: Optional[str] = None
+    full_name: Optional[str] = None
+
+
+class PhoneResetRequest(BaseModel):
+    """手机号找回密码请求"""
+
+    phone: str
+    code: str
+    new_password: str
 
 
 class ProcessRequest(BaseModel):
@@ -67,21 +184,172 @@ class TaskStatus(BaseModel):
     updated_at: str
 
 
+async def get_current_user(
+    response: Response,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> str:
+    """从Bearer Token中解析当前用户。"""
+
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="未提供认证凭证")
+
+    if credentials.scheme.lower() != "bearer":
+        raise HTTPException(status_code=401, detail="不支持的认证方式")
+
+    payload = decode_access_token(credentials.credentials)
+    if not payload:
+        raise HTTPException(status_code=401, detail="访问令牌无效或已过期")
+
+    username = payload.get("sub")
+
+    user_record = get_user(username)
+    if not user_record or user_record.get("disabled"):
+        raise HTTPException(status_code=401, detail="用户不可用")
+
+    if should_refresh_token(payload.get("exp")):
+        new_token, expires_at = create_access_token(username)
+        response.headers["X-Access-Token"] = new_token
+        response.headers["X-Token-Expires-In"] = str(compute_expires_in(expires_at))
+
+    return username
+
+
 @app.get("/")
 async def root():
     """根路径"""
     return {
-        "name": "Advanced OCR API",
+        "name": "图像转Word API",
         "version": "1.0.0",
         "status": "running",
         "endpoints": {
+            "login": "/api/login",
+            "me": "/api/me",
             "process": "/api/process",
             "batch": "/api/batch",
             "task": "/api/task/{task_id}",
             "download": "/api/download/{filename}",
-            "models": "/api/models"
         }
     }
+
+
+@app.post("/api/auth/phone/send-code", response_model=PhoneCodeResponse)
+async def request_phone_code(request: PhoneCodeRequest):
+    """发送手机验证码"""
+
+    purpose = request.purpose.lower()
+    if purpose not in {PHONE_PURPOSE_REGISTER, PHONE_PURPOSE_RESET}:
+        raise HTTPException(status_code=400, detail="不支持的验证码用途")
+
+    normalized_phone = normalize_phone_number(request.phone)
+    if not validate_phone_number(normalized_phone):
+        raise HTTPException(status_code=400, detail="手机号格式不正确")
+
+    if purpose == PHONE_PURPOSE_REGISTER:
+        if get_user_by_phone_number(normalized_phone):
+            raise HTTPException(status_code=400, detail="手机号已注册")
+    else:
+        if not get_user_by_phone_number(normalized_phone):
+            raise HTTPException(status_code=404, detail="手机号未注册")
+
+    try:
+        code, ttl = send_phone_verification_code(normalized_phone, purpose)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=429, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    payload = {"message": "验证码已发送，如未收到请稍后重试", "ttl": ttl}
+    if DEBUG_PHONE_CODE:
+        payload["debug_code"] = code
+    return PhoneCodeResponse(**payload)
+
+
+@app.post("/api/auth/phone/register", response_model=TokenResponse)
+async def register_with_phone(request: PhoneRegisterRequest):
+    """使用手机号注册账号"""
+
+    normalized_phone = normalize_phone_number(request.phone)
+    if not validate_phone_number(normalized_phone):
+        raise HTTPException(status_code=400, detail="手机号格式不正确")
+
+    if get_user_by_phone_number(normalized_phone):
+        raise HTTPException(status_code=400, detail="手机号已注册")
+
+    username = request.username.strip() if request.username else normalized_phone
+    if not username:
+        raise HTTPException(status_code=400, detail="用户名不能为空")
+
+    if get_user(username):
+        raise HTTPException(status_code=400, detail="用户名已存在")
+
+    if len(request.password) < 6:
+        raise HTTPException(status_code=400, detail="密码长度必须不少于6位")
+
+    if not verify_phone_code(normalized_phone, PHONE_PURPOSE_REGISTER, request.code):
+        raise HTTPException(status_code=400, detail="验证码无效或已过期")
+
+    created = register_user_with_phone(
+        username=username,
+        password=request.password,
+        phone=normalized_phone,
+        full_name=request.full_name,
+    )
+
+    if not created:
+        raise HTTPException(status_code=400, detail="注册失败，请稍后重试")
+
+    access_token, expires_at = create_access_token(subject=username)
+    return TokenResponse(
+        access_token=access_token,
+        expires_in=compute_expires_in(expires_at),
+    )
+
+
+@app.post("/api/auth/phone/reset-password")
+async def reset_password_with_phone_endpoint(request: PhoneResetRequest):
+    """通过手机验证码重置密码"""
+
+    normalized_phone = normalize_phone_number(request.phone)
+    if not validate_phone_number(normalized_phone):
+        raise HTTPException(status_code=400, detail="手机号格式不正确")
+
+    user = get_user_by_phone_number(normalized_phone)
+    if not user:
+        raise HTTPException(status_code=404, detail="手机号未注册")
+
+    if len(request.new_password) < 6:
+        raise HTTPException(status_code=400, detail="新密码长度必须不少于6位")
+
+    if not verify_phone_code(normalized_phone, PHONE_PURPOSE_RESET, request.code):
+        raise HTTPException(status_code=400, detail="验证码无效或已过期")
+
+    if not reset_password_with_phone(normalized_phone, request.new_password):
+        raise HTTPException(status_code=500, detail="重置密码失败，请稍后重试")
+
+    return {"message": "密码已重置，请使用新密码登录"}
+
+
+@app.post("/api/login", response_model=TokenResponse)
+async def login(request: LoginRequest):
+    """用户登录并获取访问令牌"""
+
+    user = authenticate_user(request.username, request.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+
+    access_token, expires_at = create_access_token(subject=user["username"])
+    return TokenResponse(
+        access_token=access_token,
+        expires_in=compute_expires_in(expires_at),
+    )
+
+
+@app.get("/api/me", response_model=UserProfile)
+async def read_current_user(current_user: str = Depends(get_current_user)):
+    """获取当前登录用户信息"""
+
+    record = get_user(current_user) or {}
+    return UserProfile(username=current_user, full_name=record.get("full_name"))
 
 
 @app.get("/api/models")
@@ -131,7 +399,8 @@ async def process_image(
     llm_provider: str = "gemini",
     include_original_image: bool = True,
     image_quality: int = 95,
-    background_tasks: BackgroundTasks = None
+    background_tasks: BackgroundTasks = None,
+    current_user: str = Depends(get_current_user),
 ):
     """
     处理单个图像
@@ -172,7 +441,8 @@ async def process_image(
                 "llm_provider": llm_provider,
                 "include_original_image": include_original_image,
                 "image_quality": image_quality
-            }
+            },
+            "user": current_user,
         }
         
         tasks[task_id] = task
@@ -253,7 +523,7 @@ async def process_task(task_id: str):
 
 
 @app.get("/api/task/{task_id}")
-async def get_task_status(task_id: str):
+async def get_task_status(task_id: str, current_user: str = Depends(get_current_user)):
     """
     获取任务状态
     
@@ -266,7 +536,10 @@ async def get_task_status(task_id: str):
     task = tasks.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
-    
+
+    if task.get("user") != current_user:
+        raise HTTPException(status_code=403, detail="无权访问该任务")
+
     return {
         "task_id": task["task_id"],
         "status": task["status"],
@@ -279,7 +552,7 @@ async def get_task_status(task_id: str):
 
 
 @app.get("/api/download/{filename}")
-async def download_file(filename: str):
+async def download_file(filename: str, current_user: str = Depends(get_current_user)):
     """
     下载生成的文件
     
@@ -293,7 +566,21 @@ async def download_file(filename: str):
     
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="文件不存在")
-    
+
+    # Ensure the requested file belongs to the current user
+    allowed = False
+    for task in tasks.values():
+        if isinstance(task, dict) and task.get("user") == current_user:
+            result = task.get("result")
+            if result:
+                output_path = result.get("output_path")
+                if output_path and Path(output_path).name == filename:
+                    allowed = True
+                    break
+
+    if not allowed:
+        raise HTTPException(status_code=403, detail="无权下载该文件")
+
     return FileResponse(
         path=file_path,
         filename=filename,
@@ -304,7 +591,8 @@ async def download_file(filename: str):
 @app.post("/api/batch")
 async def batch_process(
     files: List[UploadFile] = File(...),
-    llm_provider: str = "gemini"
+    llm_provider: str = "gemini",
+    current_user: str = Depends(get_current_user),
 ):
     """
     批量处理多个图像
@@ -348,9 +636,10 @@ async def batch_process(
                     "llm_provider": llm_provider,
                     "include_original_image": True,
                     "image_quality": 95
-                }
+                },
+                "user": current_user,
             }
-            
+
             tasks[task_id] = task
             sub_task_ids.append(task_id)
         
@@ -361,9 +650,10 @@ async def batch_process(
             "total": len(sub_task_ids),
             "completed": 0,
             "failed": 0,
-            "created_at": datetime.now().isoformat()
+            "created_at": datetime.now().isoformat(),
+            "user": current_user,
         }
-        
+
         tasks[f"batch_{batch_id}"] = batch_task
         
         # 异步处理所有子任务
@@ -381,7 +671,7 @@ async def batch_process(
 
 
 @app.get("/api/batch/{batch_id}")
-async def get_batch_status(batch_id: str):
+async def get_batch_status(batch_id: str, current_user: str = Depends(get_current_user)):
     """
     获取批处理状态
     
@@ -394,6 +684,9 @@ async def get_batch_status(batch_id: str):
     batch_task = tasks.get(f"batch_{batch_id}")
     if not batch_task:
         raise HTTPException(status_code=404, detail="批处理任务不存在")
+
+    if batch_task.get("user") != current_user:
+        raise HTTPException(status_code=403, detail="无权访问该批处理任务")
     
     # 统计子任务状态
     completed = 0
@@ -424,4 +717,3 @@ async def get_batch_status(batch_id: str):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8005)
-

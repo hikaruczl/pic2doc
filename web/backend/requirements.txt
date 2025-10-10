@@ -4,9 +4,14 @@
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 python-multipart==0.0.6
+python-jose[cryptography]==3.3.0
 
 # CORS
 python-dotenv==1.0.0
+
+# Database
+psycopg2-binary==2.9.9
+redis==5.0.1
 
 # Core OCR dependencies (from main requirements.txt)
 python-docx==1.1.0
@@ -33,4 +38,3 @@ colorlog==6.8.0
 # Image processing
 opencv-python==4.8.1.78
 numpy==1.26.2
-
