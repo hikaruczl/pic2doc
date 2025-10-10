@@ -1,6 +1,8 @@
 import axios, { AxiosError } from 'axios';
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8005';
+// Use relative path in production, localhost for development
+const API_BASE = import.meta.env.VITE_API_BASE ||
+  (import.meta.env.MODE === 'production' ? '' : 'http://localhost:8005');
 
 let authToken: string | null = null;
 let unauthorizedHandler: (() => void) | null = null;

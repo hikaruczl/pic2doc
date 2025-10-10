@@ -42,7 +42,7 @@ yarn-error.log*
 # Environment variables
 .env
 .env.local
-.env.production
+.env.production.local
 docker/.env
 
 # Logs
