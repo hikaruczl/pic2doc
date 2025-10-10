@@ -45,12 +45,23 @@ cd "$(dirname "$0")"
 # Check if .env file exists
 if [ ! -f ".env" ]; then
     echo "未找到.env文件，正在创建..."
-    cp .env.example .env
+
+    # 检测环境并使用相应的模板
+    if [ -f ".env.server.example" ]; then
+        cp .env.server.example .env
+        echo "已使用服务器配置模板创建 .env"
+    else
+        cp .env.example .env
+        echo "已使用默认配置模板创建 .env"
+    fi
+
     echo ""
     echo "⚠️  请编辑 .env 文件并配置以下内容:"
     echo "   1. 数据库密码 (DB_PASSWORD)"
     echo "   2. JWT密钥 (AUTH_SECRET_KEY)"
     echo "   3. LLM API密钥 (OPENAI_API_KEY, ANTHROPIC_API_KEY等)"
+    echo ""
+    echo "提示: 如果使用外部数据库，请修改 DB_HOST"
     echo ""
     read -p "按回车键继续，或按Ctrl+C退出编辑.env文件..."
 fi
