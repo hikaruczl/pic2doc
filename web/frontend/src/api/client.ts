@@ -180,6 +180,14 @@ export function getDownloadUrl(outputPath: string): string {
   return `${API_BASE}/api/download/${filename}`;
 }
 
+export async function downloadFile(outputPath: string): Promise<Blob> {
+  const filename = outputPath.split('/').pop() || outputPath;
+  const { data } = await api.get(`/api/download/${filename}`, {
+    responseType: 'blob'
+  });
+  return data;
+}
+
 export interface BatchResponse { batch_id: string; total_tasks: number; }
 export interface BatchStatus {
   batch_id: string;
