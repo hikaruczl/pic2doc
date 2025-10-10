@@ -46,7 +46,8 @@ client_max_body_size 200M;  # 修改为 200MB
 然后重启服务：
 ```bash
 cd docker
-docker compose restart frontend
+docker compose build frontend
+docker compose up -d frontend  # 注意：必须用 up -d，不是 restart
 ```
 
 ## 当前配置说明
