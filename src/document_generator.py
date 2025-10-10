@@ -499,15 +499,16 @@ class DocumentGenerator:
         run.italic = True
     
     def create_from_analysis(self, analysis_result: Dict, original_image: Image.Image,
-                            elements: List[Dict]) -> str:
+                            elements: List[Dict], filename: Optional[str] = None) -> str:
         """
         从分析结果创建并保存文档
-        
+
         Args:
             analysis_result: LLM分析结果
             original_image: 原始图像
             elements: 格式化的元素列表
-            
+            filename: 可选的输出文件名
+
         Returns:
             保存的文件路径
         """
@@ -517,11 +518,11 @@ class DocumentGenerator:
             'provider': f"{analysis_result.get('provider', 'unknown')} - {analysis_result.get('model', 'unknown')}",
             'subject': 'Math Problem OCR'
         }
-        
+
         # 创建文档
         doc = self.create_document(elements, original_image, metadata)
-        
+
         # 保存文档
-        filepath = self.save_document(doc)
-        
+        filepath = self.save_document(doc, filename)
+
         return filepath

@@ -188,20 +188,42 @@ export async function downloadFile(outputPath: string): Promise<Blob> {
   return data;
 }
 
-export interface BatchResponse { batch_id: string; total_tasks: number; }
+export interface BatchResponse { batch_id: string; total_tasks: number; merge_mode: boolean; }
+
+export interface BatchTaskDetail {
+  task_id: string;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  message: string;
+  file_path: string;
+  result?: {
+    output_path: string;
+    statistics: {
+      total_formulas: number;
+      display_formulas: number;
+      inline_formulas: number;
+    };
+    images_processed?: number;
+  };
+}
+
 export interface BatchStatus {
   batch_id: string;
+  merge_mode: boolean;
   total: number;
   completed: number;
   failed: number;
   processing: number;
   pending: number;
+  tasks: BatchTaskDetail[];
 }
 
-export async function uploadBatch(files: File[], provider: Provider): Promise<BatchResponse> {
+export async function uploadBatch(files: File[], provider: Provider, mergeDocuments: boolean = false): Promise<BatchResponse> {
   const form = new FormData();
   files.forEach(f => form.append('files', f));
-  const params = new URLSearchParams({ llm_provider: provider.toLowerCase() });
+  const params = new URLSearchParams({
+    llm_provider: provider.toLowerCase(),
+    merge_documents: String(mergeDocuments)
+  });
   const { data } = await api.post<BatchResponse>(`/api/batch?${params.toString()}`, form, {
     headers: { 'Content-Type': 'multipart/form-data' }
   });

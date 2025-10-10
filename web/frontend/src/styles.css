@@ -504,6 +504,13 @@ header p {
   font-size: 13px;
 }
 
+.field-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 /* ==================== 网格布局 ==================== */
 .grid {
   display: grid;
@@ -791,4 +798,112 @@ footer small {
   font-family: 'Fira Code', 'Courier New', monospace;
   font-size: 13px;
   color: var(--primary-light);
+}
+
+/* ==================== 批量处理任务列表 ==================== */
+.batch-results {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
+.batch-results h3 {
+  margin: 0 0 16px 0;
+  color: var(--text-primary);
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.task-item {
+  background: var(--bg-secondary);
+  padding: 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  transition: all 0.2s;
+}
+
+.task-item:hover {
+  border-color: var(--border-light);
+  box-shadow: var(--shadow-sm);
+}
+
+.task-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.task-filename {
+  color: var(--text-primary);
+  font-weight: 500;
+  font-size: 14px;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-right: 12px;
+}
+
+.task-status {
+  font-size: 13px;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.task-status.status-completed {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--success);
+}
+
+.task-status.status-processing {
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--warning);
+}
+
+.task-status.status-pending {
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--text-muted);
+}
+
+.task-status.status-failed {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--error);
+}
+
+.task-error {
+  color: var(--error);
+  font-size: 13px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: rgba(239, 68, 68, 0.1);
+  border-radius: 6px;
+  border-left: 3px solid var(--error);
+}
+
+.task-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.task-stats {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.task-actions button {
+  padding: 6px 16px;
+  font-size: 13px;
 }

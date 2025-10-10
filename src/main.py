@@ -431,26 +431,125 @@ class AdvancedOCR:
     def process_batch(self, image_paths: List[str]) -> List[dict]:
         """
         批量处理多个图像
-        
+
         Args:
             image_paths: 图像文件路径列表
-            
+
         Returns:
             处理结果列表
         """
         self.logger.info(f"开始批量处理 {len(image_paths)} 个图像")
-        
+
         results = []
         for idx, image_path in enumerate(image_paths, 1):
             self.logger.info(f"处理进度: {idx}/{len(image_paths)}")
             result = self.process_image(image_path)
             results.append(result)
-        
+
         # 统计
         success_count = sum(1 for r in results if r['success'])
         self.logger.info(f"批量处理完成: {success_count}/{len(image_paths)} 成功")
-        
+
         return results
+
+    def process_batch_merged(self, image_paths: List[str], output_filename: Optional[str] = None) -> dict:
+        """
+        批量处理多个图像并合并到单个文档
+
+        Args:
+            image_paths: 图像文件路径列表
+            output_filename: 输出文件名 (可选)
+
+        Returns:
+            处理结果字典
+        """
+        self.logger.info(f"开始批量处理并合并 {len(image_paths)} 个图像")
+
+        try:
+            all_elements = []
+            all_original_images = []
+            total_stats = {
+                'total_formulas': 0,
+                'display_formulas': 0,
+                'inline_formulas': 0,
+                'formulas': []
+            }
+            combined_analysis = {
+                'content': '',
+                'provider': None,
+                'model': None
+            }
+
+            # 处理每个图像
+            for idx, image_path in enumerate(image_paths, 1):
+                self.logger.info(f"处理进度: {idx}/{len(image_paths)}")
+
+                # 1. 验证图像
+                is_valid, error_msg = self.image_processor.validate_image(image_path)
+                if not is_valid:
+                    self.logger.warning(f"图像验证失败: {image_path} - {error_msg}")
+                    continue
+
+                # 2. 处理图像
+                processed_images, original_image = self.image_processor.process_image(image_path)
+                all_original_images.append(original_image)
+
+                # 3. 调用LLM分析
+                analysis_segments = self.llm_client.analyze_images(processed_images)
+                analysis_result = self._merge_analysis_segments(analysis_segments)
+
+                content = analysis_result['content']
+
+                # 记录provider和model（使用第一个）
+                if combined_analysis['provider'] is None:
+                    combined_analysis['provider'] = analysis_result.get('provider')
+                    combined_analysis['model'] = analysis_result.get('model')
+
+                # 添加图像标题分隔
+                if idx > 1:
+                    combined_analysis['content'] += '\n\n---\n\n'
+                combined_analysis['content'] += f'# 图像 {idx}\n\n{content}'
+
+                # 4. 解析和转换公式
+                elements = self.formula_converter.parse_content(content)
+                formatted_elements = self.formula_converter.format_for_word(elements)
+                all_elements.extend(formatted_elements)
+
+                # 统计公式
+                stats = self.formula_converter.get_formula_statistics(content)
+                total_stats['total_formulas'] += stats['total_formulas']
+                total_stats['display_formulas'] += stats['display_formulas']
+                total_stats['inline_formulas'] += stats['inline_formulas']
+                if 'formulas' in stats:
+                    total_stats['formulas'].extend(stats['formulas'])
+
+            # 5. 生成合并的Word文档
+            self.logger.info("生成合并的Word文档")
+
+            # 使用第一个原始图像（如果需要包含图像）
+            first_image = all_original_images[0] if all_original_images else None
+
+            output_path = self.document_generator.create_from_analysis(
+                combined_analysis, first_image, all_elements, output_filename
+            )
+
+            self.logger.info(f"批量合并处理完成! 输出文件: {output_path}")
+
+            return {
+                'success': True,
+                'output_path': output_path,
+                'analysis': combined_analysis,
+                'statistics': total_stats,
+                'elements_count': len(all_elements),
+                'images_processed': len(image_paths)
+            }
+
+        except Exception as e:
+            self.logger.error(f"批量合并处理失败: {str(e)}", exc_info=True)
+            return {
+                'success': False,
+                'error': str(e)
+            }
 
 
 def main():
