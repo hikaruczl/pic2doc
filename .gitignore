@@ -90,3 +90,11 @@ htmlcov/
 .AppleDouble
 .LSOverride
 ._*
+
+# SSL certificates (keep README but ignore actual certificates)
+docker/ssl/*.pem
+docker/ssl/*.key
+docker/ssl/*.crt
+
+# TypeScript build info
+*.tsbuildinfo
