@@ -10,7 +10,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
-      - "5432:5432"
+      - "5433:5432"  # Use 5433 externally to avoid conflict
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-ocr_user}"]
       interval: 10s
@@ -73,7 +73,10 @@ services:
       dockerfile: docker/Dockerfile.frontend
     container_name: ocr_frontend
     ports:
-      - "5173:80"
+      - "80:80"     # HTTP (redirects to HTTPS)
+      - "443:443"   # HTTPS
+    volumes:
+      - ./ssl:/etc/nginx/ssl:ro  # Mount SSL certificates (read-only)
     depends_on:
       - backend
     networks:
