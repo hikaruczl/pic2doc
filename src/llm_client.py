@@ -4,7 +4,9 @@ LLM API客户端模块
 """
 
 import os
+import re
 import time
+import json
 import logging
 import inspect
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -148,33 +150,29 @@ class LLMClient:
         logger.info(f"LLMClient initialized - Primary: {self.primary_provider}, Fallback: {self.fallback_provider}")
     
     def analyze_image(self, image: Image.Image) -> Dict[str, Any]:
-        """
-        分析图像并提取数学内容
-        
-        Args:
-            image: PIL Image对象
-            
-        Returns:
-            包含提取内容的字典
-        """
+        """分析图像并提取数学内容"""
         try:
-            # 首先尝试主要提供商
-            result = self._analyze_with_retry(image, self.primary_provider)
-            
-            if result:
-                return result
-            
-            # 如果主要提供商失败,尝试备用提供商
-            if self.fallback_provider and self.fallback_provider != self.primary_provider:
-                logger.warning(f"主要提供商 {self.primary_provider} 失败,尝试备用提供商 {self.fallback_provider}")
-                result = self._analyze_with_retry(image, self.fallback_provider)
-                
-                if result:
+            providers = self._build_provider_chain()
+            last_result: Optional[Dict[str, Any]] = None
+
+            for provider in providers:
+                result = self._analyze_with_retry(image, provider)
+                if not result:
+                    continue
+
+                content = result.get('content', '')
+                if not self._content_lacks_transcription(content):
                     return result
-            
-            # 所有提供商都失败
+
+                logger.warning("提供商 %s 返回内容缺少完整文本或仅包含代码，尝试下一个提供商", provider)
+                last_result = result
+
+            if last_result:
+                logger.warning("所有可用提供商均未返回完整转录，使用最后一次结果")
+                return last_result
+
             raise Exception("所有LLM提供商都无法处理图像")
-            
+
         except Exception as e:
             logger.error(f"图像分析失败: {str(e)}")
             raise
@@ -230,6 +228,7 @@ class LLMClient:
             for idx, img in enumerate(images):
                 logger.info("串行处理图像分片 %s/%s", idx + 1, len(images))
                 result = self.analyze_image(img)
+                result = self._post_process_geometry(result, img)
                 result['segment_index'] = idx
                 sequential_results.append(result)
             return sequential_results
@@ -240,6 +239,7 @@ class LLMClient:
         def _worker(index: int, img: Image.Image) -> Dict[str, Any]:
             logger.info("并行处理图像分片 %s/%s", index + 1, len(images))
             result = self.analyze_image(img)
+            result = self._post_process_geometry(result, img)
             result['segment_index'] = index
             return result
 
@@ -262,6 +262,236 @@ class LLMClient:
                     raise
 
         return [res for res in results if res is not None]
+
+    GEOMETRY_PLACEHOLDER_PATTERN = re.compile(
+        r'```(?:latex|tex)?\s*\\begin\{figure\}.*?\\includegraphics[^{}]*\{placeholder\.png\}.*?```',
+        re.DOTALL | re.IGNORECASE
+    )
+
+    def _post_process_geometry(self, result: Dict[str, Any], image: Image.Image) -> Dict[str, Any]:
+        """检测并修复几何图形的占位符代码块"""
+        content = result.get('content')
+        if not content or not isinstance(content, str):
+            return result
+
+        metadata = result.setdefault('metadata', {})
+
+        match = self.GEOMETRY_PLACEHOLDER_PATTERN.search(content)
+        if match:
+            logger.info("检测到几何图占位符，尝试生成TikZ代码替换")
+            tikz_block = self._generate_geometry_tikz(image)
+            if not tikz_block:
+                logger.warning("TikZ生成失败，保留原始占位符内容")
+                return result
+
+            tikz_block = self._ensure_tikz_block(tikz_block)
+            if not tikz_block:
+                logger.warning("生成内容无效，保留占位符")
+                return result
+            new_content = content[:match.start()] + tikz_block + content[match.end():]
+            result['content'] = new_content
+            metadata['geometry_tikz_generated'] = True
+            logger.info("几何图占位符已替换为生成的TikZ代码")
+            return result
+
+        content_lower = content.lower()
+        if '\\begin{tikzpicture}' in content_lower or metadata.get('geometry_tikz_generated'):
+            return result
+
+        geometry_keywords = ['如图', '图所示', '见图', '下图', '几何图', '立体几何']
+        if any(keyword in content for keyword in geometry_keywords):
+            logger.info("检测到几何描述但无TikZ代码，尝试补充渲染")
+            tikz_block = self._generate_geometry_tikz(image)
+            if tikz_block:
+                tikz_block = self._ensure_tikz_block(tikz_block)
+                if tikz_block:
+                    result['content'] = tikz_block + '\n\n' + content
+                    metadata['geometry_tikz_generated'] = True
+                    logger.info("已在内容前插入生成的TikZ代码")
+                else:
+                    logger.warning("生成的TikZ内容无效，保留原文本")
+            else:
+                logger.warning("TikZ生成失败，保留原文本")
+        return result
+
+    @staticmethod
+    def _content_lacks_transcription(content: str) -> bool:
+        """判定内容是否缺少正文（仅包含代码块或JSON）"""
+        stripped = content.strip()
+        if not stripped:
+            return True
+        if stripped.startswith('```'):
+            try:
+                body = stripped.split('```', 2)[1]
+            except IndexError:
+                body = ''
+            if not re.search(r'[A-Za-z0-9\u4e00-\u9fa5]', body):
+                return True
+            stripped = body.strip()
+        if stripped.lower().startswith('\\begin{tikzpicture}'):
+            return True
+        if stripped.startswith('{') or stripped.startswith('['):
+            try:
+                json.loads(stripped)
+                return True
+            except json.JSONDecodeError:
+                return False
+        return False
+
+    def _build_provider_chain(self) -> List[str]:
+        """构建用于重试的模型提供商顺序"""
+        chain: List[str] = []
+
+        def add(provider: Optional[str]):
+            if not provider:
+                return
+            if provider in chain:
+                return
+            if self._is_provider_available(provider):
+                chain.append(provider)
+
+        add(self.primary_provider)
+        add(self.fallback_provider)
+
+        for provider in ['openai', 'gemini', 'anthropic', 'qwen']:
+            add(provider)
+
+        return chain
+
+    def _is_provider_available(self, provider: str) -> bool:
+        if provider == 'openai':
+            return bool(self.openai_client and self.openai_api_key)
+        if provider == 'anthropic':
+            return bool(self.anthropic_client and self.anthropic_api_key)
+        if provider == 'gemini':
+            return bool(GEMINI_AVAILABLE and self.gemini_api_key)
+        if provider == 'qwen':
+            return bool(QWEN_AVAILABLE and self.qwen_api_key)
+        return False
+
+    def _log_payload(self, provider: str, payload: dict):
+        try:
+            serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+        except TypeError:
+            serialized = str(payload)
+        logger.info("LLM Request Payload (%s):\n%s", provider, serialized)
+
+    def _generate_geometry_tikz(self, image: Image.Image) -> Optional[str]:
+        """调用LLM生成TikZ代码"""
+        providers_to_try = [self.primary_provider]
+        if self.fallback_provider and self.fallback_provider not in providers_to_try:
+            providers_to_try.append(self.fallback_provider)
+
+        for provider in providers_to_try:
+            try:
+                if provider == 'qwen' and self.qwen_api_key and QWEN_AVAILABLE:
+                    tikz = self._generate_tikz_with_qwen(image)
+                elif provider == 'openai' and self.openai_api_key and self.openai_client:
+                    tikz = self._generate_tikz_with_openai(image)
+                elif provider == 'anthropic' and self.anthropic_api_key and self.anthropic_client:
+                    tikz = self._generate_tikz_with_anthropic(image)
+                elif provider == 'gemini' and self.gemini_api_key and GEMINI_AVAILABLE:
+                    tikz = self._generate_tikz_with_gemini(image)
+                else:
+                    continue
+
+                if tikz:
+                    return tikz
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("生成TikZ时提供商 %s 失败: %s", provider, exc)
+
+        return None
+
+    def _get_geometry_prompts(self) -> Dict[str, str]:
+        prompts_cfg = self.config.get('prompts', {}) or {}
+        system_prompt = prompts_cfg.get('geometry_tikz_system', '').strip()
+        user_prompt = prompts_cfg.get('geometry_tikz_user', '').strip()
+
+        if not system_prompt:
+            system_prompt = (
+                "You are an expert LaTeX TikZ illustrator."
+                " Analyze the provided geometry figure and recreate it precisely using TikZ commands."
+                " Ensure the code compiles without external files and uses standard libraries only."
+                " Respond ONLY with the TikZ code wrapped in ```tikz ... ``` with no explanations."
+            )
+
+        if not user_prompt:
+            user_prompt = (
+                "请根据给定图像生成完整的 TikZ 代码，精确还原所有点、线段、角度与标注。"
+                " 仅输出 TikZ 代码，并使用 ```tikz ... ``` 包裹，不要添加其他说明。"
+            )
+
+        return {'system': system_prompt, 'user': user_prompt}
+
+    def _generate_tikz_with_qwen(self, image: Image.Image) -> Optional[str]:
+        import tempfile
+
+        prompts = self._get_geometry_prompts()
+        qwen_config = self.config.get('llm', {}).get('qwen', {})
+        model_name = os.getenv('QWEN_MODEL', qwen_config.get('model', 'qwen-vl-plus'))
+
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+            temp_path = tmp_file.name
+            image.save(temp_path, format='PNG')
+
+        try:
+            messages = [
+                {
+                    'role': 'system',
+                    'content': [{'text': prompts['system']}]
+                },
+                {
+                    'role': 'user',
+                    'content': [
+                        {'image': f'file://{temp_path}'},
+                        {'text': prompts['user']}
+                    ]
+                }
+            ]
+
+            call_kwargs = {
+                'model': model_name,
+                'messages': messages
+            }
+            if self._qwen_supports_timeout:
+                call_kwargs['timeout'] = self.request_timeout
+
+            self._log_payload('qwen-tikz', call_kwargs)
+            logger.info("调用Qwen生成TikZ代码...")
+            response = MultiModalConversation.call(**call_kwargs)
+
+            if response.status_code != 200:
+                raise Exception(f"Qwen TikZ生成失败: {response.code} - {response.message}")
+
+            tikz = response.output.choices[0].message.content[0]['text'].strip()
+            logger.info("Qwen返回TikZ代码 (前100字符): %s...", tikz[:100])
+
+            if '\\begin{tikzpicture}' not in tikz:
+                logger.warning("Qwen返回的内容不包含tikzpicture环境")
+            return tikz
+        finally:
+            import os as os_module
+            if os_module.path.exists(temp_path):
+                os_module.unlink(temp_path)
+
+    @staticmethod
+    def _ensure_tikz_block(tikz: str) -> str:
+        tikz = tikz.strip()
+        if '\\begin{tikzpicture}' not in tikz:
+            logger.warning("生成的内容不包含tikzpicture环境，忽略插入")
+            return ''
+        if not tikz.startswith('```'):
+            tikz = f'```tikz\n{tikz}\n```'
+        return tikz
+
+    def _generate_tikz_with_openai(self, image: Image.Image) -> Optional[str]:
+        return None
+
+    def _generate_tikz_with_anthropic(self, image: Image.Image) -> Optional[str]:
+        return None
+
+    def _generate_tikz_with_gemini(self, image: Image.Image) -> Optional[str]:
+        return None
     
     def _analyze_with_openai(self, image: Image.Image) -> Dict[str, Any]:
         """
@@ -575,6 +805,7 @@ class LLMClient:
             if self._qwen_supports_timeout:
                 call_kwargs['timeout'] = self.request_timeout
 
+            self._log_payload('qwen', call_kwargs)
             response = MultiModalConversation.call(**call_kwargs)
 
             if response.status_code == 200:

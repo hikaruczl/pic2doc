@@ -4,6 +4,7 @@ Word文档生成模块
 """
 
 import os
+import re
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -17,6 +18,8 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from PIL import Image
 
+from .tikz_renderer import TikZRenderer
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,21 +29,26 @@ class DocumentGenerator:
     def __init__(self, config: dict):
         """
         初始化文档生成器
-        
+
         Args:
             config: 配置字典
         """
         self.config = config
         self.doc_config = config.get('document', {})
+        self.minimal_layout = self.doc_config.get('minimal_layout', False)
         self.output_dir = config.get('output', {}).get('directory', 'output')
-        
+
         # 确保输出目录存在
         Path(self.output_dir).mkdir(parents=True, exist_ok=True)
-        
-        logger.info("DocumentGenerator initialized")
+
+        # 初始化TikZ渲染器
+        self.tikz_renderer = TikZRenderer(config)
+
+        logger.info("DocumentGenerator initialized (TikZ enabled: %s)",
+                   self.tikz_renderer.enabled)
     
     def create_document(self, elements: List[Dict], original_image: Optional[Image.Image] = None,
-                       metadata: Optional[Dict] = None) -> Document:
+                       metadata: Optional[Dict] = None, minimal_layout: Optional[bool] = None) -> Document:
         """
         创建Word文档
         
@@ -53,31 +61,35 @@ class DocumentGenerator:
             Document对象
         """
         doc = Document()
-        
-        # 设置文档属性
+
+        layout = self.minimal_layout if minimal_layout is None else minimal_layout
+
+        # 始终设置文档属性，便于追踪来源
         self._set_document_properties(doc, metadata)
-        
-        # 设置页边距
+
+        if layout:
+            # 极简布局：只渲染内容，保持专注于公式预览
+            for element in elements:
+                self._add_element(doc, element)
+
+            logger.info("文档创建完成（极简布局），共 %s 个元素", len(elements))
+            return doc
+
+        # 常规布局
         self._set_page_margins(doc)
-        
-        # 添加标题
         self._add_title(doc, metadata)
-        
-        # 添加原始图像 (如果配置允许)
+
         if original_image and self.doc_config.get('include_original_image', True):
             self._add_original_image(doc, original_image)
-        
-        # 添加分隔线
+
         doc.add_paragraph('_' * 50)
-        
-        # 添加内容元素
+
         for element in elements:
             self._add_element(doc, element)
-        
-        # 添加页脚
+
         self._add_footer(doc, metadata)
-        
-        logger.info(f"文档创建完成,共 {len(elements)} 个元素")
+
+        logger.info("文档创建完成,共 %s 个元素", len(elements))
         return doc
     
     def save_document(self, doc: Document, filename: Optional[str] = None) -> str:
@@ -170,19 +182,186 @@ class DocumentGenerator:
     
     def _add_element(self, doc: Document, element: Dict):
         """添加单个元素到文档"""
+        logger.info("Adding element type=%s content_snippet=%s", element['type'], str(element.get('content', ''))[:100])
         if element['type'] == 'paragraph':
             self._add_paragraph(doc, element['content'])
         
+        elif element['type'] == 'text':
+            # 处理包含行内公式的文本
+            self._add_text_with_inline_formulas(doc, element['content'])
+        
         elif element['type'] == 'formula':
             self._add_formula(doc, element)
+
+    def _append_matrix_with_brackets(self, mtable, omml_parent, open_bracket: str, close_bracket: str) -> bool:
+        """将MathML的mtable结构转换为带伸缩括号的OMML矩阵"""
+        from lxml import etree
+
+        MATH_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
+
+        matrix_rows: List[List] = []
+        max_cols = 0
+
+        for row in mtable:
+            row_tag = row.tag.split('}')[-1] if '}' in row.tag else row.tag
+            if row_tag != 'mtr':
+                continue
+
+            row_cells = []
+            for cell in row:
+                cell_tag = cell.tag.split('}')[-1] if '}' in cell.tag else cell.tag
+                if cell_tag == 'mtd':
+                    row_cells.append(cell)
+
+            if row_cells:
+                matrix_rows.append(row_cells)
+                if len(row_cells) > max_cols:
+                    max_cols = len(row_cells)
+
+        if not matrix_rows:
+            logger.debug("mtable未找到有效的矩阵行，跳过矩阵转换")
+            return False
+
+        d = etree.SubElement(omml_parent, '{%s}d' % MATH_NS)
+        dPr = etree.SubElement(d, '{%s}dPr' % MATH_NS)
+
+        begChr = etree.SubElement(dPr, '{%s}begChr' % MATH_NS)
+        begChr.set('{%s}val' % MATH_NS, open_bracket)
+
+        endChr = etree.SubElement(dPr, '{%s}endChr' % MATH_NS)
+        endChr.set('{%s}val' % MATH_NS, close_bracket)
+
+        matrix_container = etree.SubElement(d, '{%s}e' % MATH_NS)
+        m = etree.SubElement(matrix_container, '{%s}m' % MATH_NS)
+
+        if max_cols:
+            mPr = etree.SubElement(m, '{%s}mPr' % MATH_NS)
+            mcs = etree.SubElement(mPr, '{%s}mcs' % MATH_NS)
+            mc = etree.SubElement(mcs, '{%s}mc' % MATH_NS)
+            mcPr = etree.SubElement(mc, '{%s}mcPr' % MATH_NS)
+
+            count = etree.SubElement(mcPr, '{%s}count' % MATH_NS)
+            count.set('{%s}val' % MATH_NS, str(max_cols))
+
+            mcJc = etree.SubElement(mcPr, '{%s}mcJc' % MATH_NS)
+            mcJc.set('{%s}val' % MATH_NS, 'center')
+
+        for row_cells in matrix_rows:
+            mr = etree.SubElement(m, '{%s}mr' % MATH_NS)
+            for cell in row_cells:
+                e = etree.SubElement(mr, '{%s}e' % MATH_NS)
+
+                has_child = False
+                for grandchild in cell:
+                    has_child = True
+                    self._convert_mathml_element_to_omml(grandchild, e)
+
+                if not has_child:
+                    text = (cell.text or '').strip()
+                    if text:
+                        r = etree.SubElement(e, '{%s}r' % MATH_NS)
+                        t = etree.SubElement(r, '{%s}t' % MATH_NS)
+                        t.text = text
+
+        return True
     
+    @staticmethod
+    def _clean_xml_incompatible_chars(text: str) -> str:
+        """清理XML不兼容的字符（NULL字节和控制字符）"""
+        import re
+        # 移除NULL字节和XML不兼容的控制字符
+        # 保留制表符(\t)、换行符(\n)、回车符(\r)
+        # 移除其他控制字符 (0x00-0x08, 0x0B-0x0C, 0x0E-0x1F, 0x7F-0x9F)
+        cleaned = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]', '', text)
+        return cleaned
+
     def _add_paragraph(self, doc: Document, text: str):
-        """添加段落，支持行内公式"""
+        """添加段落，支持行内公式和TikZ图形"""
         import re
         from latex2mathml.converter import convert as latex_to_mathml
-        
+
+        # 清理XML不兼容的字符
+        text = self._clean_xml_incompatible_chars(text)
+
+        # 扫描所有代码块 (```lang ... ```)
+        code_block_pattern = re.compile(r"```(?P<lang>[a-zA-Z0-9_-]+)?\s*\n?(?P<code>.*?)```", re.DOTALL)
+        matches = list(code_block_pattern.finditer(text))
+
+        if matches:
+            logger.info("Detected %s code block(s) inside paragraph: %s", len(matches), text[:120])
+            current_pos = 0
+
+            for block in matches:
+                # 处理代码块之前的文本
+                if block.start() > current_pos:
+                    pre_text = text[current_pos:block.start()].strip()
+                    if pre_text:
+                        self._add_text_with_inline_formulas(doc, pre_text)
+
+                lang = (block.group('lang') or '').lower()
+                code = block.group('code').strip()
+
+                if lang == 'json':
+                    self._add_json_block(doc, code)
+                    current_pos = block.end()
+                    continue
+
+                tikz_code = self._extract_tikz_code(code)
+                if tikz_code:
+                    logger.info("Rendering TikZ block extracted from %s code block", lang or 'plain')
+                    self._add_tikz_figure(doc, tikz_code)
+                else:
+                    logger.debug("Code block not recognized as TikZ")
+                    if lang in {'latex', 'tex'}:
+                        cleaned = code.replace('\\(', '$').replace('\\)', '$')
+                        cleaned = cleaned.replace('\\[', '$$').replace('\\]', '$$')
+                        cleaned = cleaned.replace("\\\\", "\\")
+                        paragraphs = re.split(r'\n\s*\n', cleaned)
+                        for paragraph_text in paragraphs:
+                            paragraph_text = paragraph_text.strip()
+                            if paragraph_text:
+                                self._add_text_with_inline_formulas(doc, paragraph_text)
+                    else:
+                        paragraph = doc.add_paragraph()
+                        run = paragraph.add_run(code)
+                        run.font.name = 'Courier New'
+                        run.font.size = Pt(self.doc_config.get('default_font_size', 11))
+
+                current_pos = block.end()
+
+            # 处理剩余文本
+            if current_pos < len(text):
+                remaining = text[current_pos:].strip()
+                if remaining:
+                    self._add_text_with_inline_formulas(doc, remaining)
+            return
+
+        # 未检测到代码块，检查是否直接包含TikZ环境
+        tikz_inline = self._extract_tikz_code(text)
+        if tikz_inline:
+            logger.info("Rendering inline TikZ environment from paragraph")
+            self._add_tikz_figure(doc, tikz_inline)
+            # 移除代码块及其围栏
+            residual = re.sub(r'```[a-zA-Z0-9_-]*\s*\n?.*?```', '', text, flags=re.DOTALL)
+            residual = residual.replace(tikz_inline, '').strip()
+            if residual:
+                self._add_text_with_inline_formulas(doc, residual)
+            return
+
+        # 默认：处理常规文本内容
+        self._add_text_with_inline_formulas(doc, text)
+
+    def _add_text_with_inline_formulas(self, doc: Document, text: str):
+        """添加文本段落，处理行内公式"""
+        import re
+        from latex2mathml.converter import convert as latex_to_mathml
+
+        # 统一将 \(\) 与 \[\] 转换为 $ / $$ 以便正则匹配
+        text = text.replace('\\(', '$').replace('\\)', '$')
+        text = text.replace('\\[', '$$').replace('\\]', '$$')
+
         paragraph = doc.add_paragraph()
-        
+
         # 查找所有行内公式 $...$（排除 $$...$$）
         # 使用负向预测和回顾来排除双$
         inline_formula_pattern = r'(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)'
@@ -196,7 +375,8 @@ class DocumentGenerator:
                 run.font.name = self.doc_config.get('default_font', 'Arial')
             
             # 添加行内公式
-            latex = match.group(1).strip()
+            latex = (match.group(1) or match.group(2)).strip()  # 支持$...$或\(...\)
+            logger.debug("Inline formula detected: %s", latex)
             latex = self._normalize_inline_latex(latex)
             try:
                 mathml = latex_to_mathml(latex)
@@ -222,6 +402,81 @@ class DocumentGenerator:
             run.font.size = Pt(self.doc_config.get('default_font_size', 11))
             run.font.name = self.doc_config.get('default_font', 'Arial')
 
+    def _add_tikz_figure(self, doc: Document, tikz_code: str):
+        """渲染并添加TikZ图形到文档"""
+        if not self.tikz_renderer.enabled:
+            logger.warning("TikZ renderer is disabled, skipping figure")
+            # 添加提示文本
+            paragraph = doc.add_paragraph()
+            run = paragraph.add_run("[TikZ 图形未渲染：缺少依赖]")
+            run.font.name = 'Courier New'
+            run.font.size = Pt(10)
+            run.font.color.rgb = RGBColor(255, 0, 0)
+            return
+
+        try:
+            logger.info("Rendering TikZ figure...")
+            # 渲染TikZ图形
+            image = self.tikz_renderer.render_tikz_to_image(tikz_code)
+
+            if image:
+                # 保存图片到BytesIO
+                img_buffer = BytesIO()
+                image.save(img_buffer, format='PNG')
+                img_buffer.seek(0)
+
+                # 添加图片到文档
+                width = self.doc_config.get('image_width_inches', 6.0)
+                doc.add_picture(img_buffer, width=Inches(width))
+
+                # 添加空行
+                doc.add_paragraph()
+
+                logger.info("TikZ figure added successfully")
+            else:
+                logger.error("TikZ rendering failed, adding placeholder")
+                # 添加错误提示
+                paragraph = doc.add_paragraph()
+                run = paragraph.add_run("[TikZ 图形渲染失败]")
+                run.font.name = 'Courier New'
+                run.font.size = Pt(10)
+                run.font.color.rgb = RGBColor(255, 0, 0)
+
+        except Exception as e:
+            logger.error(f"Error adding TikZ figure: {str(e)}")
+            import traceback
+            logger.debug(traceback.format_exc())
+
+            # 添加错误提示
+            paragraph = doc.add_paragraph()
+            run = paragraph.add_run(f"[TikZ 图形渲染错误: {str(e)}]")
+            run.font.name = 'Courier New'
+            run.font.size = Pt(10)
+            run.font.color.rgb = RGBColor(255, 0, 0)
+
+    def _add_json_block(self, doc: Document, code: str):
+        """以等宽字体插入JSON文本"""
+        lines = code.split('\n')
+        for idx, line in enumerate(lines):
+            paragraph = doc.add_paragraph()
+            run = paragraph.add_run(line)
+            run.font.name = 'Courier New'
+            run.font.size = Pt(self.doc_config.get('default_font_size', 11))
+            if idx == 0:
+                paragraph.paragraph_format.space_before = Pt(6)
+
+    @staticmethod
+    def _extract_tikz_code(code: str) -> Optional[str]:
+        """从代码块中提取TikZ环境"""
+        import re
+
+        match = re.search(r'\\begin\{tikzpicture\}.*?\\end\{tikzpicture\}', code, re.DOTALL)
+        if match:
+            tikz_code = match.group(0).strip()
+            logger.debug(f"Extracted TikZ code (first 100 chars): {tikz_code[:100]}...")
+            return tikz_code
+        return None
+
     @staticmethod
     def _normalize_inline_latex(latex: str) -> str:
         """将形如 f' 或 f'' 等用 prime 表示的记号转换为标准LaTeX"""
@@ -244,6 +499,10 @@ class DocumentGenerator:
         formula_type = element['formula_type']
         latex = element['latex']
         mathml = element['mathml']
+
+        # 清理XML不兼容的字符
+        latex = self._clean_xml_incompatible_chars(latex)
+        mathml = self._clean_xml_incompatible_chars(mathml)
 
         # 创建段落
         paragraph = doc.add_paragraph()
@@ -376,9 +635,58 @@ class DocumentGenerator:
                 self._convert_mathml_element_to_omml(child, omml_parent)
 
         elif tag == 'mrow':
-            # 行,处理子元素
-            for child in mathml_elem:
+            children = list(mathml_elem)
+            total_children = len(children)
+            i = 0
+
+            while i < total_children:
+                child = children[i]
+                child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+
+                # 检测模式: mo + mtable + mo (允许中间存在mspace)
+                if child_tag == 'mo':
+                    open_bracket = (child.text or '(').strip() or '('
+
+                    # 跳过空白节点
+                    mid_index = i + 1
+                    while mid_index < total_children:
+                        mid_child = children[mid_index]
+                        mid_tag = mid_child.tag.split('}')[-1] if '}' in mid_child.tag else mid_child.tag
+                        if mid_tag == 'mspace':
+                            mid_index += 1
+                            continue
+                        break
+                    else:
+                        mid_child = None
+                        mid_tag = None
+
+                    if mid_child is not None and mid_tag == 'mtable':
+                        end_index = mid_index + 1
+                        while end_index < total_children:
+                            end_child = children[end_index]
+                            end_tag = end_child.tag.split('}')[-1] if '}' in end_child.tag else end_child.tag
+                            if end_tag == 'mspace':
+                                end_index += 1
+                                continue
+                            break
+                        else:
+                            end_child = None
+                            end_tag = None
+
+                        if end_child is not None and end_tag == 'mo':
+                            close_bracket = (end_child.text or ')').strip() or ')'
+
+                            converted = self._append_matrix_with_brackets(
+                                mid_child, omml_parent, open_bracket, close_bracket
+                            )
+
+                            if converted:
+                                i = end_index + 1
+                                continue
+
+                # 默认处理
                 self._convert_mathml_element_to_omml(child, omml_parent)
+                i += 1
 
         elif tag in ['mi', 'mn', 'mo', 'mtext']:
             # 标识符、数字、运算符、文本
@@ -420,6 +728,19 @@ class DocumentGenerator:
                 self._convert_mathml_element_to_omml(children[0], e)
                 self._convert_mathml_element_to_omml(children[1], sub)
 
+        elif tag == 'msubsup':
+            # 同时有下标和上标（问题1的修复）
+            ssubsup = etree.SubElement(omml_parent, '{%s}sSubSup' % MATH_NS)
+            e = etree.SubElement(ssubsup, '{%s}e' % MATH_NS)
+            sub = etree.SubElement(ssubsup, '{%s}sub' % MATH_NS)
+            sup = etree.SubElement(ssubsup, '{%s}sup' % MATH_NS)
+
+            children = list(mathml_elem)
+            if len(children) >= 3:
+                self._convert_mathml_element_to_omml(children[0], e)
+                self._convert_mathml_element_to_omml(children[1], sub)
+                self._convert_mathml_element_to_omml(children[2], sup)
+
         elif tag == 'msqrt':
             # 平方根
             rad = etree.SubElement(omml_parent, '{%s}rad' % MATH_NS)
@@ -442,20 +763,111 @@ class DocumentGenerator:
                 self._convert_mathml_element_to_omml(children[0], e)
                 self._convert_mathml_element_to_omml(children[1], deg)
 
+        elif tag == 'mover':
+            # 上方符号（问题2的修复：向量、上划线等）
+            # 检查是否是accent（重音符号）
+            accent_attr = mathml_elem.get('accent', 'false')
+
+            if accent_attr == 'true':
+                # 使用accent结构
+                acc = etree.SubElement(omml_parent, '{%s}acc' % MATH_NS)
+                accPr = etree.SubElement(acc, '{%s}accPr' % MATH_NS)
+                e = etree.SubElement(acc, '{%s}e' % MATH_NS)
+
+                children = list(mathml_elem)
+                if len(children) >= 2:
+                    # 第一个子元素是基础，第二个是上方符号
+                    self._convert_mathml_element_to_omml(children[0], e)
+                    # 设置accent字符
+                    chr_elem = etree.SubElement(accPr, '{%s}chr' % MATH_NS)
+                    accent_text = children[1].text if children[1].text else '→'
+                    chr_elem.set('{%s}val' % MATH_NS, accent_text)
+            else:
+                # 使用bar结构（上划线）或limUpp结构
+                # 检查上方是否是overline或bar
+                children = list(mathml_elem)
+                if len(children) >= 2:
+                    over_elem = children[1]
+                    over_text = over_elem.text if over_elem.text else ''
+
+                    # 检查是否是上划线
+                    if '‾' in over_text or 'OverBar' in over_text or over_text == '¯':
+                        # 使用bar结构
+                        bar = etree.SubElement(omml_parent, '{%s}bar' % MATH_NS)
+                        barPr = etree.SubElement(bar, '{%s}barPr' % MATH_NS)
+                        pos = etree.SubElement(barPr, '{%s}pos' % MATH_NS)
+                        pos.set('{%s}val' % MATH_NS, 'top')
+                        e = etree.SubElement(bar, '{%s}e' % MATH_NS)
+                        self._convert_mathml_element_to_omml(children[0], e)
+                    else:
+                        # 使用limUpp结构（上方符号，如向量箭头）
+                        limUpp = etree.SubElement(omml_parent, '{%s}limUpp' % MATH_NS)
+                        e = etree.SubElement(limUpp, '{%s}e' % MATH_NS)
+                        lim = etree.SubElement(limUpp, '{%s}lim' % MATH_NS)
+
+                        self._convert_mathml_element_to_omml(children[0], e)
+                        self._convert_mathml_element_to_omml(children[1], lim)
+
+        elif tag == 'munder':
+            # 下方符号（下划线等）
+            # 使用limLow结构或bar结构
+            children = list(mathml_elem)
+            if len(children) >= 2:
+                under_elem = children[1]
+                under_text = under_elem.text if under_elem.text else ''
+
+                # 检查是否是下划线
+                if '_' in under_text or 'UnderBar' in under_text:
+                    # 使用bar结构
+                    bar = etree.SubElement(omml_parent, '{%s}bar' % MATH_NS)
+                    barPr = etree.SubElement(bar, '{%s}barPr' % MATH_NS)
+                    pos = etree.SubElement(barPr, '{%s}pos' % MATH_NS)
+                    pos.set('{%s}val' % MATH_NS, 'bot')
+                    e = etree.SubElement(bar, '{%s}e' % MATH_NS)
+                    self._convert_mathml_element_to_omml(children[0], e)
+                else:
+                    # 使用limLow结构
+                    limLow = etree.SubElement(omml_parent, '{%s}limLow' % MATH_NS)
+                    e = etree.SubElement(limLow, '{%s}e' % MATH_NS)
+                    lim = etree.SubElement(limLow, '{%s}lim' % MATH_NS)
+
+                    self._convert_mathml_element_to_omml(children[0], e)
+                    self._convert_mathml_element_to_omml(children[1], lim)
+
         elif tag == 'mtable':
-            # 表格结构(用于aligned/gathered环境)
-            # OMML中使用eqArr(方程组数组)来表示
-            eqArr = etree.SubElement(omml_parent, '{%s}eqArr' % MATH_NS)
+            # 矩阵表格 - 检查父元素是否包含括号
+            parent = mathml_elem.getparent()
+            has_brackets = False
 
-            # 处理每一行
-            for row in mathml_elem:
-                row_tag = row.tag.split('}')[-1] if '}' in row.tag else row.tag
-                if row_tag == 'mtr':  # 表格行
-                    e = etree.SubElement(eqArr, '{%s}e' % MATH_NS)
+            if parent is not None:
+                parent_tag = parent.tag.split('}')[-1] if '}' in parent.tag else parent.tag
+                if parent_tag == 'mrow':
+                    # 检查mrow的第一个和最后一个子元素是否是括号
+                    siblings = list(parent)
+                    if len(siblings) >= 3:
+                        first_tag = siblings[0].tag.split('}')[-1] if '}' in siblings[0].tag else siblings[0].tag
+                        last_tag = siblings[-1].tag.split('}')[-1] if '}' in siblings[-1].tag else siblings[-1].tag
+                        if first_tag == 'mo' and last_tag == 'mo':
+                            has_brackets = True
 
-                    # 处理行中的单元格
-                    for cell in row:
-                        cell_tag = cell.tag.split('}')[-1] if '}' in cell.tag else cell.tag
+            if has_brackets:
+                # 矩阵已经在mrow处理时添加了括号，这里只处理内容
+                # 跳过，让mrow处理
+                return
+            else:
+                # 表格结构(用于aligned/gathered环境或无括号矩阵)
+                # OMML中使用eqArr(方程组数组)来表示
+                eqArr = etree.SubElement(omml_parent, '{%s}eqArr' % MATH_NS)
+
+                # 处理每一行
+                for row in mathml_elem:
+                    row_tag = row.tag.split('}')[-1] if '}' in row.tag else row.tag
+                    if row_tag == 'mtr':  # 表格行
+                        e = etree.SubElement(eqArr, '{%s}e' % MATH_NS)
+
+                        # 处理行中的单元格
+                        for cell in row:
+                            cell_tag = cell.tag.split('}')[-1] if '}' in cell.tag else cell.tag
                         if cell_tag == 'mtd':  # 表格单元格
                             for child in cell:
                                 self._convert_mathml_element_to_omml(child, e)
@@ -469,6 +881,66 @@ class DocumentGenerator:
             # 表格单元格(如果直接遇到,不在mtr中)
             for child in mathml_elem:
                 self._convert_mathml_element_to_omml(child, omml_parent)
+
+        elif tag == 'mfenced':
+            # 括号结构（问题3的修复：矩阵括号）
+            # 获取开闭括号属性
+            open_bracket = mathml_elem.get('open', '(')
+            close_bracket = mathml_elem.get('close', ')')
+
+            # 检查是否包含mtable（矩阵）
+            has_mtable = False
+            for child in mathml_elem:
+                child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+                if child_tag == 'mtable':
+                    has_mtable = True
+                    break
+
+            if has_mtable:
+                # 矩阵情况：使用m结构
+                d = etree.SubElement(omml_parent, '{%s}d' % MATH_NS)
+                dPr = etree.SubElement(d, '{%s}dPr' % MATH_NS)
+
+                # 设置括号字符
+                begChr = etree.SubElement(dPr, '{%s}begChr' % MATH_NS)
+                begChr.set('{%s}val' % MATH_NS, open_bracket)
+                endChr = etree.SubElement(dPr, '{%s}endChr' % MATH_NS)
+                endChr.set('{%s}val' % MATH_NS, close_bracket)
+
+                # 处理矩阵内容
+                for child in mathml_elem:
+                    child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+                    if child_tag == 'mtable':
+                        # 创建矩阵结构
+                        m = etree.SubElement(d, '{%s}m' % MATH_NS)
+
+                        # 处理每一行
+                        for row in child:
+                            row_tag = row.tag.split('}')[-1] if '}' in row.tag else row.tag
+                            if row_tag == 'mtr':
+                                mr = etree.SubElement(m, '{%s}mr' % MATH_NS)
+                                # 处理每个单元格
+                                for cell in row:
+                                    cell_tag = cell.tag.split('}')[-1] if '}' in cell.tag else cell.tag
+                                    if cell_tag == 'mtd':
+                                        e = etree.SubElement(mr, '{%s}e' % MATH_NS)
+                                        for grandchild in cell:
+                                            self._convert_mathml_element_to_omml(grandchild, e)
+            else:
+                # 普通括号：使用d结构
+                d = etree.SubElement(omml_parent, '{%s}d' % MATH_NS)
+                dPr = etree.SubElement(d, '{%s}dPr' % MATH_NS)
+
+                # 设置括号字符
+                begChr = etree.SubElement(dPr, '{%s}begChr' % MATH_NS)
+                begChr.set('{%s}val' % MATH_NS, open_bracket)
+                endChr = etree.SubElement(dPr, '{%s}endChr' % MATH_NS)
+                endChr.set('{%s}val' % MATH_NS, close_bracket)
+
+                # 处理内容
+                e = etree.SubElement(d, '{%s}e' % MATH_NS)
+                for child in mathml_elem:
+                    self._convert_mathml_element_to_omml(child, e)
 
         elif tag == 'mspace':
             # 空格 - 在OMML中添加空文本
@@ -499,7 +971,8 @@ class DocumentGenerator:
         run.italic = True
     
     def create_from_analysis(self, analysis_result: Dict, original_image: Image.Image,
-                            elements: List[Dict], filename: Optional[str] = None) -> str:
+                            elements: List[Dict], filename: Optional[str] = None,
+                            minimal_layout: Optional[bool] = None) -> str:
         """
         从分析结果创建并保存文档
 
@@ -520,7 +993,7 @@ class DocumentGenerator:
         }
 
         # 创建文档
-        doc = self.create_document(elements, original_image, metadata)
+        doc = self.create_document(elements, original_image, metadata, minimal_layout=minimal_layout)
 
         # 保存文档
         filepath = self.save_document(doc, filename)

@@ -113,6 +113,12 @@ class AdvancedOCR:
         file_formatter = logging.Formatter(log_format)
         file_handler.setFormatter(file_formatter)
         root_logger.addHandler(file_handler)
+
+        # 额外的 backend.log 文件
+        backend_log_file = os.path.join(log_dir, 'backend.log')
+        backend_handler = logging.FileHandler(backend_log_file)
+        backend_handler.setFormatter(file_formatter)
+        root_logger.addHandler(backend_handler)
     
     def process_image(self, image_path: str, output_filename: Optional[str] = None) -> dict:
         """

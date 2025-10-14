@@ -28,6 +28,10 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
+# ⚠️ 重要：必须在导入其他模块前加载环境变量
+# 否则 database.py 等模块读取环境变量时会使用默认值
+load_dotenv()
+
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -53,34 +57,37 @@ from web.backend.auth import (
 from web.backend.database import init_db_pool, close_db_pool
 from web.backend.redis_client import init_redis_client, close_redis_client
 
-# 加载环境变量
-load_dotenv()
-
 logger = logging.getLogger(__name__)
 
 DEBUG_PHONE_CODE = os.getenv("AUTH_DEBUG_PHONE_CODE", "false").lower() in {"1", "true", "yes"}
+SKIP_DB_INIT = os.getenv("SKIP_DB_INIT", "false").lower() in {"1", "true", "yes"}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup and shutdown events."""
     # Startup
-    logger.info("Initializing database connection pool...")
-    init_db_pool()
+    if SKIP_DB_INIT:
+        logger.warning("⚠️  Skipping database and Redis initialization (SKIP_DB_INIT=true)")
+        logger.info("Running in standalone mode - authentication features disabled")
+    else:
+        logger.info("Initializing database connection pool...")
+        init_db_pool()
 
-    logger.info("Initializing Redis client...")
-    init_redis_client()
+        logger.info("Initializing Redis client...")
+        init_redis_client()
 
     logger.info("Application startup complete")
 
     yield
 
     # Shutdown
-    logger.info("Closing database connection pool...")
-    close_db_pool()
+    if not SKIP_DB_INIT:
+        logger.info("Closing database connection pool...")
+        close_db_pool()
 
-    logger.info("Closing Redis client...")
-    close_redis_client()
+        logger.info("Closing Redis client...")
+        close_redis_client()
 
     logger.info("Application shutdown complete")
 

@@ -13,24 +13,259 @@ logger = logging.getLogger(__name__)
 
 class FormulaConverter:
     """公式转换器类"""
-    
+
     # LaTeX公式匹配模式
-    DISPLAY_FORMULA_PATTERN = r'\$\$(.*?)\$\$'
+    # 显示公式正则：$$ ... $$ 或 \[ ... \] 或 \begin{equation} ... \end{equation}
+    DISPLAY_FORMULA_PATTERN = r'\$\$(.+?)\$\$|\\\[(.+?)\\\]|\\begin\{equation\}\*?(.+?)\\end\{equation\}\*?'
     INLINE_FORMULA_PATTERN = r'\$(.*?)\$'
-    
+
+    # Unicode符号到LaTeX命令的映射
+    UNICODE_TO_LATEX = {
+        # 数学运算符
+        'Σ': r'\sum', '∑': r'\sum',
+        'Π': r'\prod', '∏': r'\prod',
+        '∫': r'\int', '∬': r'\iint', '∭': r'\iiint',
+        '∮': r'\oint',
+        '∂': r'\partial',
+        '∇': r'\nabla',
+        '√': r'\sqrt',
+        '∞': r'\infty',
+
+        # 关系符号
+        '≈': r'\approx',
+        '≠': r'\neq', '≡': r'\equiv',
+        '≤': r'\leq', '≥': r'\geq',
+        '≪': r'\ll', '≫': r'\gg',
+        '∝': r'\propto',
+        '∈': r'\in', '∉': r'\notin',
+        '⊂': r'\subset', '⊃': r'\supset',
+        '⊆': r'\subseteq', '⊇': r'\supseteq',
+        '∪': r'\cup', '∩': r'\cap',
+        '∅': r'\emptyset',
+
+        # 箭头
+        '→': r'\rightarrow', '←': r'\leftarrow',
+        '⇒': r'\Rightarrow', '⇐': r'\Leftarrow',
+        '⇔': r'\Leftrightarrow',
+        '↔': r'\leftrightarrow',
+
+        # 逻辑符号
+        '∀': r'\forall', '∃': r'\exists',
+        '¬': r'\neg',
+        '∧': r'\wedge', '∨': r'\vee',
+
+        # 其他数学符号
+        '×': r'\times', '÷': r'\div',
+        '±': r'\pm', '∓': r'\mp',
+        '⋅': r'\cdot',
+        '∘': r'\circ',
+        '⊥': r'\perp', '⟂': r'\perp',
+        '∥': r'\parallel', '‖': r'\parallel',
+        '∠': r'\angle', '△': r'\triangle',
+        '°': r'^{\circ}',
+
+        # 希腊字母（小写）
+        'α': r'\alpha', 'β': r'\beta',
+        'γ': r'\gamma', 'δ': r'\delta',
+        'ε': r'\epsilon', 'ζ': r'\zeta',
+        'η': r'\eta', 'θ': r'\theta',
+        'ι': r'\iota', 'κ': r'\kappa',
+        'λ': r'\lambda', 'μ': r'\mu',
+        'ν': r'\nu', 'ξ': r'\xi',
+        'π': r'\pi', 'ρ': r'\rho',
+        'σ': r'\sigma', 'τ': r'\tau',
+        'υ': r'\upsilon', 'φ': r'\phi',
+        'χ': r'\chi', 'ψ': r'\psi',
+        'ω': r'\omega',
+
+        # 希腊字母（大写）
+        'Α': r'\Alpha', 'Β': r'\Beta',
+        'Γ': r'\Gamma', 'Δ': r'\Delta',
+        'Ε': r'\Epsilon', 'Ζ': r'\Zeta',
+        'Η': r'\Eta', 'Θ': r'\Theta',
+        'Ι': r'\Iota', 'Κ': r'\Kappa',
+        'Λ': r'\Lambda', 'Μ': r'\Mu',
+        'Ν': r'\Nu', 'Ξ': r'\Xi',
+        'Ο': r'\Omicron', 'Ρ': r'\Rho',
+        'Σ': r'\Sigma', 'Τ': r'\Tau',
+        'Υ': r'\Upsilon', 'Φ': r'\Phi',
+        'Χ': r'\Chi', 'Ψ': r'\Psi',
+        'Ω': r'\Omega',
+    }
+
     def __init__(self, config: dict):
         """
         初始化公式转换器
-        
+
         Args:
             config: 配置字典
         """
         self.config = config
         self.output_format = config.get('formula', {}).get('output_format', 'mathml')
         self.preserve_latex = config.get('formula', {}).get('preserve_latex', True)
-        
+
         logger.info("FormulaConverter initialized")
-    
+
+    def fix_unicode_to_latex(self, content: str) -> str:
+        """
+        将LLM输出中的Unicode数学符号转换为标准LaTeX命令
+
+        Args:
+            content: 可能包含Unicode符号的内容
+
+        Returns:
+            转换后的内容
+        """
+        original_content = content
+        replacements_made = []
+
+        # 替换所有Unicode符号
+        for unicode_char, latex_cmd in self.UNICODE_TO_LATEX.items():
+            if unicode_char in content:
+                count = content.count(unicode_char)
+                content = content.replace(unicode_char, latex_cmd)
+                replacements_made.append(f"{unicode_char}→{latex_cmd} ({count}次)")
+
+        if replacements_made:
+            logger.info(f"Unicode→LaTeX转换: {', '.join(replacements_made)}")
+
+        return content
+
+    def fix_common_latex_patterns(self, content: str) -> str:
+        """
+        修复LLM输出中常见的LaTeX格式问题
+
+        Args:
+            content: LaTeX内容
+
+        Returns:
+            修复后的内容
+        """
+        import re
+
+        fixes_applied = []
+
+        # -1. 清理控制字符（LLM有时会输出backspace等控制字符）
+        # 移除所有ASCII控制字符（除了换行\n、回车\r、制表符\t）
+        # 注意：必须在所有正则匹配之前清理，因为控制字符会干扰正则匹配
+        control_chars = r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'
+        if re.search(control_chars, content):
+            content = re.sub(control_chars, '', content)
+            fixes_applied.append("清理控制字符")
+
+        # 0. 修复OCR常见错误
+        # 修复 ar{ → \bar{ (OCR经常把 \bar 识别成 ar，或者带控制字符如 \x08ar{)
+        # 先匹配可能带控制字符的情况
+        if re.search(r'(?<!\\)ar\{', content):
+            content = re.sub(r'(?<!\\)ar\{', r'\\bar{', content)
+            fixes_applied.append("ar{→\\bar{")
+
+        # 修复 下标+空格+数字 → 下标^数字 (例如: y_0 2 → y_0^2, x_0 2 → x_0^2)
+        # 匹配模式: 字母_数字或字母 后跟 空格 数字
+        subscript_space_number = r'([A-Za-z]_[A-Za-z0-9]+)\s+(\d+)'
+        if re.search(subscript_space_number, content):
+            content = re.sub(subscript_space_number, r'\1^\2', content)
+            fixes_applied.append("下标+空格+数字→下标^数字")
+
+        # 修复 下标+数字（无空格）→ 下标^数字 (例如: y_02 → y_0^2, x_01 → x_0^1, 2y_02 → 2y_0^2)
+        # 匹配模式: 字母_单个数字 后面直接跟数字（无空格）
+        # 注意：移除了(?<!{)限制，允许修复大括号内的错误（如\frac{x_02}{...}）
+        subscript_no_space_number = r'([A-Za-z]_\d)(\d+)'
+        if re.search(subscript_no_space_number, content):
+            content = re.sub(subscript_no_space_number, r'\1^\2', content)
+            fixes_applied.append("下标+数字（无空格）→下标^数字")
+
+        # 修复 ar{ 后面跟字母和数字，但缺少下标符号 (例如: ar{x}1 → \bar{x}_1)
+        # 这个模式匹配 \bar{字母}数字，添加缺失的下标
+        bar_missing_subscript = r'\\bar\{([A-Za-z])\}(\d+)'
+        if re.search(bar_missing_subscript, content):
+            content = re.sub(bar_missing_subscript, r'\\bar{\1}_\2', content)
+            fixes_applied.append("\\bar{x}数字→\\bar{x}_数字")
+
+        # 1. 修复组合字符的上划线 (Ȳ, ā 等) → \bar{Y}, \bar{a}
+        # 匹配带组合上划线的拉丁字母
+        combining_overline_pattern = r'([A-Za-z])\u0304'  # \u0304 是组合上划线
+        if re.search(combining_overline_pattern, content):
+            def replace_overline(match):
+                return f'\\bar{{{match.group(1)}}}'
+            content = re.sub(combining_overline_pattern, replace_overline, content)
+            fixes_applied.append("组合上划线→\\bar{}")
+
+        # 2. 修复文本形式的分数 (a)/(b) 或 a/b → \frac{a}{b}
+        # 注意：只在 $ 公式环境内修复
+        def fix_fractions_in_math(match):
+            math_content = match.group(1)
+            # 匹配 (expression)/(expression) 或 word/word
+            fraction_pattern = r'\(([^)]+)\)/\(([^)]+)\)|(\w+)/(\w+)'
+
+            def replace_fraction(frac_match):
+                if frac_match.group(1):  # (a)/(b) 格式
+                    return f'\\frac{{{frac_match.group(1)}}}{{{frac_match.group(2)}}}'
+                else:  # a/b 格式
+                    return f'\\frac{{{frac_match.group(3)}}}{{{frac_match.group(4)}}}'
+
+            fixed = re.sub(fraction_pattern, replace_fraction, math_content)
+            if fixed != math_content:
+                fixes_applied.append("文本分数→\\frac{}{}")
+            return f'${fixed}$'
+
+        # 只在行内公式中修复
+        content = re.sub(r'\$([^$]+)\$', fix_fractions_in_math, content)
+
+        # 3. 修复缺失花括号的上下标 (例如: x^2y → x^{2}y, Y_i+1 → Y_{i+1})
+        # 这个比较复杂，暂时只处理简单情况
+        def fix_subscripts_superscripts(match):
+            math_content = match.group(1)
+            # 修复上标: x^abc → x^{abc}
+            math_content = re.sub(r'\^([a-zA-Z0-9]{2,})', r'^{\1}', math_content)
+            # 修复下标: x_abc → x_{abc}
+            math_content = re.sub(r'_([a-zA-Z0-9]{2,})', r'_{\1}', math_content)
+            return f'${math_content}$'
+
+        content = re.sub(r'\$([^$]+)\$', fix_subscripts_superscripts, content)
+
+        # 4. 修复常见的错误表达
+        error_patterns = {
+            r'Y-': r'\bar{Y}',  # Y- → \bar{Y}
+            r'x-': r'\bar{x}',  # x- → \bar{x}
+            r'(\d+)\*(\d+)': r'\1 \\times \2',  # 数字乘法用 \times
+        }
+
+        for pattern, replacement in error_patterns.items():
+            if re.search(pattern, content):
+                content = re.sub(pattern, replacement, content)
+                fixes_applied.append(f"{pattern}→{replacement}")
+
+        if fixes_applied:
+            logger.info(f"LaTeX格式修复: {', '.join(fixes_applied)}")
+
+        return content
+
+    def post_process_llm_output(self, content: str) -> str:
+        """
+        对LLM输出进行后处理，统一调用所有修复方法
+
+        Args:
+            content: LLM原始输出
+
+        Returns:
+            修复后的内容
+        """
+        logger.info("=" * 80)
+        logger.info("开始后处理LLM输出")
+        logger.info("=" * 80)
+
+        # 1. Unicode符号转LaTeX
+        content = self.fix_unicode_to_latex(content)
+
+        # 2. 修复常见LaTeX格式问题
+        content = self.fix_common_latex_patterns(content)
+
+        logger.info("后处理完成")
+        logger.info("=" * 80)
+
+        return content
+
     def parse_content(self, content: str) -> List[Dict]:
         """
         解析内容,提取文本和公式
@@ -42,18 +277,23 @@ class FormulaConverter:
         Returns:
             包含文本和公式的结构化列表
         """
+        # 先进行后处理修复
+        content = self.post_process_llm_output(content)
+
         # 预处理：修复LLM可能返回的格式问题
         content = self._preprocess_llm_output(content)
 
         elements = []
         current_pos = 0
 
-        # 只查找显示公式 $$...$$
+        # 只查找显示公式 $$...$$, \[...\], \begin{equation}...\end{equation}
         display_formulas = []
         for match in re.finditer(self.DISPLAY_FORMULA_PATTERN, content, re.DOTALL):
+            # 提取实际的LaTeX内容（从三个可能的捕获组中）
+            latex_content = match.group(1) or match.group(2) or match.group(3)
             display_formulas.append({
                 'type': 'display',
-                'latex': match.group(1).strip(),
+                'latex': latex_content.strip(),
                 'start': match.start(),
                 'end': match.end(),
                 'full_match': match.group(0)
@@ -370,7 +610,10 @@ class FormulaConverter:
         
         # 提取显示公式
         for match in re.finditer(self.DISPLAY_FORMULA_PATTERN, content, re.DOTALL):
-            formulas.append(('display', match.group(1).strip()))
+            # 提取实际的LaTeX内容（从三个可能的捕获组中）
+            latex_content = match.group(1) or match.group(2) or match.group(3)
+            if latex_content:
+                formulas.append(('display', latex_content.strip()))
         
         # 提取行内公式
         for match in re.finditer(self.INLINE_FORMULA_PATTERN, content):
@@ -412,15 +655,28 @@ class FormulaConverter:
         
         for element in elements:
             if element['type'] == 'text':
-                # 分段处理文本
-                paragraphs = element['content'].split('\n\n')
+                content = element['content']
+                paragraphs: List[str] = []
+
+                # 保留 ```code``` 区块，不被换行分割
+                pattern = re.compile(r'```[\s\S]*?```')
+                last_pos = 0
+                for block in pattern.finditer(content):
+                    pre = content[last_pos:block.start()]
+                    if pre:
+                        paragraphs.extend([p for p in pre.split('\n\n') if p.strip()])
+                    paragraphs.append(block.group(0).strip())
+                    last_pos = block.end()
+
+                tail = content[last_pos:]
+                if tail:
+                    paragraphs.extend([p for p in tail.split('\n\n') if p.strip()])
+
                 for para in paragraphs:
-                    para = para.strip()
-                    if para:
-                        formatted.append({
-                            'type': 'paragraph',
-                            'content': para
-                        })
+                    formatted.append({
+                        'type': 'paragraph',
+                        'content': para
+                    })
             
             elif element['type'] == 'formula':
                 formatted.append({
@@ -470,4 +726,3 @@ class FormulaConverter:
             'inline_formulas': inline_count,
             'formulas': formulas
         }
-

@@ -12,6 +12,10 @@ services:
       - ./logs:/app/logs
       - ./uploads:/app/uploads
       - ./.env:/app/.env:ro
+      # 挂载源码目录，使代码修改立即生效
+      - ./src:/app/src
+      - ./config:/app/config
+      - ./web:/app/web
     environment:
       - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
