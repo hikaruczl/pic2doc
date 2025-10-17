@@ -9,6 +9,7 @@ import time
 import json
 import logging
 import inspect
+from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Dict, Any, List
 from PIL import Image
@@ -36,6 +37,15 @@ except ImportError:
     QWEN_AVAILABLE = False
     logger = logging.getLogger(__name__)
     logger.warning("DashScope library not installed. Qwen-VL support disabled.")
+
+# Geometry rendering
+try:
+    from src.geometry_renderer import GeometryRenderer, parse_geometry_json
+    GEOMETRY_RENDERER_AVAILABLE = True
+except ImportError:
+    GEOMETRY_RENDERER_AVAILABLE = False
+    logger = logging.getLogger(__name__)
+    logger.warning("Geometry renderer not available. Cairo may not be installed.")
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +170,7 @@ class LLMClient:
                 if not result:
                     continue
 
+                result = self._normalize_llm_result(result)
                 content = result.get('content', '')
                 if not self._content_lacks_transcription(content):
                     return result
@@ -267,51 +278,138 @@ class LLMClient:
         r'```(?:latex|tex)?\s*\\begin\{figure\}.*?\\includegraphics[^{}]*\{placeholder\.png\}.*?```',
         re.DOTALL | re.IGNORECASE
     )
+    # 简化正则表达式，只匹配关键部分，支持任意长度的Base64字符串
+    GEOMETRY_SVG_JSON_PATTERN = re.compile(
+        r'\{\s*"img_b64"\s*:\s*"([^"]+)"\s*,\s*"format"\s*:\s*"svg"\s*\}',
+        re.IGNORECASE | re.DOTALL
+    )
+
+    @staticmethod
+    def _parse_svg_json_format(content: str) -> Optional[Dict[str, str]]:
+        """
+        解析SVG-in-JSON格式: {"text": "...", "figure_svg": "<svg>...</svg>"}
+
+        Args:
+            content: LLM返回的原始内容
+
+        Returns:
+            包含text和figure_svg的字典，解析失败返回None
+        """
+        # 清理可能的Markdown代码块标记
+        cleaned_content = content.strip()
+        if cleaned_content.startswith('```'):
+            # 移除首尾的```json或```标记
+            lines = cleaned_content.split('\n')
+            if lines[0].startswith('```'):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == '```':
+                lines = lines[:-1]
+            cleaned_content = '\n'.join(lines).strip()
+
+        # 尝试直接解析JSON
+        try:
+            data = json.loads(cleaned_content)
+            if isinstance(data, dict) and 'text' in data:
+                logger.info("成功解析SVG-in-JSON格式")
+                return {
+                    'text': data.get('text', ''),
+                    'figure_svg': data.get('figure_svg', '')
+                }
+        except json.JSONDecodeError:
+            # JSON解析失败，可能不是这种格式
+            pass
+
+        return None
 
     def _post_process_geometry(self, result: Dict[str, Any], image: Image.Image) -> Dict[str, Any]:
-        """检测并修复几何图形的占位符代码块"""
+        """检测并处理几何图形JSON或SVG-in-JSON格式"""
         content = result.get('content')
         if not content or not isinstance(content, str):
             return result
 
         metadata = result.setdefault('metadata', {})
 
-        match = self.GEOMETRY_PLACEHOLDER_PATTERN.search(content)
-        if match:
-            logger.info("检测到几何图占位符，尝试生成TikZ代码替换")
-            tikz_block = self._generate_geometry_tikz(image)
-            if not tikz_block:
-                logger.warning("TikZ生成失败，保留原始占位符内容")
-                return result
+        # 尝试解析SVG-in-JSON格式: {"text": "...", "figure_svg": "<svg>...</svg>"}
+        svg_json_data = self._parse_svg_json_format(content)
+        if svg_json_data:
+            text_content = svg_json_data.get('text', '')
+            figure_svg = svg_json_data.get('figure_svg', '')
 
-            tikz_block = self._ensure_tikz_block(tikz_block)
-            if not tikz_block:
-                logger.warning("生成内容无效，保留占位符")
-                return result
-            new_content = content[:match.start()] + tikz_block + content[match.end():]
-            result['content'] = new_content
-            metadata['geometry_tikz_generated'] = True
-            logger.info("几何图占位符已替换为生成的TikZ代码")
+            # 更新result中的content为提取的text
+            if text_content:
+                result['content'] = text_content
+                logger.info("成功解析SVG-in-JSON格式，提取了文本内容")
+
+            # 如果有SVG内容，渲染并保存到metadata
+            if figure_svg and figure_svg.strip():
+                logger.info(f"检测到 SVG 内容，长度: {len(figure_svg)} 字符")
+                metadata['figure_svg'] = figure_svg
+                metadata['has_geometry'] = True
+
+                try:
+                    import cairosvg
+                    svg_bytes = figure_svg.encode('utf-8')
+                    png_bytes = cairosvg.svg2png(bytestring=svg_bytes, output_width=800)
+                    geometry_image = Image.open(BytesIO(png_bytes))
+                    geometry_image.load()
+                    metadata['geometry_image'] = geometry_image
+                    logger.info("SVG 图形渲染成功")
+                except ImportError:
+                    logger.warning("cairosvg 未安装，无法渲染 SVG 图形")
+                except Exception as exc:
+                    logger.error(f"SVG 图形渲染失败: {exc}")
+
             return result
 
-        content_lower = content.lower()
-        if '\\begin{tikzpicture}' in content_lower or metadata.get('geometry_tikz_generated'):
-            return result
+        figure_svg = metadata.get('figure_svg')
+        if isinstance(figure_svg, str):
+            figure_svg = figure_svg.strip()
+        else:
+            figure_svg = ''
 
-        geometry_keywords = ['如图', '图所示', '见图', '下图', '几何图', '立体几何']
-        if any(keyword in content for keyword in geometry_keywords):
-            logger.info("检测到几何描述但无TikZ代码，尝试补充渲染")
-            tikz_block = self._generate_geometry_tikz(image)
-            if tikz_block:
-                tikz_block = self._ensure_tikz_block(tikz_block)
-                if tikz_block:
-                    result['content'] = tikz_block + '\n\n' + content
-                    metadata['geometry_tikz_generated'] = True
-                    logger.info("已在内容前插入生成的TikZ代码")
-                else:
-                    logger.warning("生成的TikZ内容无效，保留原文本")
+        # 尝试解析几何JSON
+        geometry_elements = parse_geometry_json(content)
+
+        if geometry_elements:
+            logger.info(f"检测到 {len(geometry_elements)} 个几何元素")
+            metadata['geometry_elements'] = geometry_elements
+            metadata['has_geometry'] = True
+
+            # 如果几何渲染器可用，生成几何图形
+            if GEOMETRY_RENDERER_AVAILABLE:
+                try:
+                    renderer = GeometryRenderer(width=800, height=600, padding=40)
+                    geometry_image = renderer.render_to_pil(geometry_elements)
+                    metadata['geometry_image'] = geometry_image
+                    logger.info("几何图形渲染成功")
+                except Exception as e:
+                    logger.error(f"几何图形渲染失败: {e}")
             else:
-                logger.warning("TikZ生成失败，保留原文本")
+                logger.warning("几何渲染器不可用，无法生成几何图形")
+        elif figure_svg:
+            logger.info("检测到 figure_svg 字段，将尝试渲染 SVG 图形")
+            metadata['has_geometry'] = True
+            if 'figure_svg' not in metadata:
+                metadata['figure_svg'] = figure_svg
+            if 'geometry_image' not in metadata:
+                try:
+                    import cairosvg
+                    svg_bytes = figure_svg.encode('utf-8')
+                    png_bytes = cairosvg.svg2png(bytestring=svg_bytes)
+                    geometry_image = Image.open(BytesIO(png_bytes))
+                    geometry_image.load()
+                    metadata['geometry_image'] = geometry_image
+                    logger.info("SVG 图形渲染成功")
+                except ImportError:
+                    logger.warning("cairosvg 未安装，无法渲染 SVG 图形")
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(f"SVG 图形渲染失败: {exc}")
+        else:
+            # 检查是否有几何关键词但没有几何JSON
+            geometry_keywords = ['如图', '图所示', '见图', '下图', '几何图', '立体几何']
+            if any(keyword in content for keyword in geometry_keywords):
+                logger.warning("检测到几何关键词但未找到几何JSON，可能需要重新生成")
+
         return result
 
     @staticmethod
@@ -330,6 +428,8 @@ class LLMClient:
             stripped = body.strip()
         if stripped.lower().startswith('\\begin{tikzpicture}'):
             return True
+        if LLMClient._extract_svg_json(stripped):
+            return False
         if stripped.startswith('{') or stripped.startswith('['):
             try:
                 json.loads(stripped)
@@ -376,8 +476,8 @@ class LLMClient:
             serialized = str(payload)
         logger.info("LLM Request Payload (%s):\n%s", provider, serialized)
 
-    def _generate_geometry_tikz(self, image: Image.Image) -> Optional[str]:
-        """调用LLM生成TikZ代码"""
+    def _generate_geometry_svg(self, image: Image.Image) -> Optional[str]:
+        """调用LLM生成SVG Base64 JSON"""
         providers_to_try = [self.primary_provider]
         if self.fallback_provider and self.fallback_provider not in providers_to_try:
             providers_to_try.append(self.fallback_provider)
@@ -385,45 +485,134 @@ class LLMClient:
         for provider in providers_to_try:
             try:
                 if provider == 'qwen' and self.qwen_api_key and QWEN_AVAILABLE:
-                    tikz = self._generate_tikz_with_qwen(image)
+                    svg_json = self._generate_svg_with_qwen(image)
                 elif provider == 'openai' and self.openai_api_key and self.openai_client:
-                    tikz = self._generate_tikz_with_openai(image)
+                    svg_json = self._generate_svg_with_openai(image)
                 elif provider == 'anthropic' and self.anthropic_api_key and self.anthropic_client:
-                    tikz = self._generate_tikz_with_anthropic(image)
+                    svg_json = self._generate_svg_with_anthropic(image)
                 elif provider == 'gemini' and self.gemini_api_key and GEMINI_AVAILABLE:
-                    tikz = self._generate_tikz_with_gemini(image)
+                    svg_json = self._generate_svg_with_gemini(image)
                 else:
                     continue
 
-                if tikz:
-                    return tikz
+                if svg_json:
+                    svg_json = svg_json.strip()
+                    if svg_json.startswith('```'):
+                        parts = svg_json.split('```')
+                        if len(parts) >= 2:
+                            svg_json = parts[1].strip()
+                    if not svg_json.startswith('【图形】'):
+                        svg_json = f'【图形】\n{svg_json}'
+                    if self._extract_svg_json(svg_json):
+                        return svg_json
+                    logger.warning("生成的SVG内容未通过格式校验，丢弃")
             except Exception as exc:  # noqa: BLE001
-                logger.warning("生成TikZ时提供商 %s 失败: %s", provider, exc)
+                logger.warning("生成SVG时提供商 %s 失败: %s", provider, exc)
 
         return None
 
     def _get_geometry_prompts(self) -> Dict[str, str]:
         prompts_cfg = self.config.get('prompts', {}) or {}
-        system_prompt = prompts_cfg.get('geometry_tikz_system', '').strip()
-        user_prompt = prompts_cfg.get('geometry_tikz_user', '').strip()
+        system_prompt = prompts_cfg.get('geometry_svg_system', '').strip()
+        user_prompt = prompts_cfg.get('geometry_svg_user', '').strip()
 
         if not system_prompt:
             system_prompt = (
-                "You are an expert LaTeX TikZ illustrator."
-                " Analyze the provided geometry figure and recreate it precisely using TikZ commands."
-                " Ensure the code compiles without external files and uses standard libraries only."
-                " Respond ONLY with the TikZ code wrapped in ```tikz ... ``` with no explanations."
+                "You are an expert vector illustrator."
+                " Analyze the provided geometry figure and recreate it precisely as an SVG."
+                " Respond ONLY with a JSON object: {\"img_b64\": \"<Base64 SVG>\", \"format\": \"svg\"}."
             )
 
         if not user_prompt:
             user_prompt = (
-                "请根据给定图像生成完整的 TikZ 代码，精确还原所有点、线段、角度与标注。"
-                " 仅输出 TikZ 代码，并使用 ```tikz ... ``` 包裹，不要添加其他说明。"
+                "请根据给定图像生成 SVG，返回 JSON：{\"img_b64\": \"<Base64 SVG>\", \"format\": \"svg\"}"
+                " 禁止输出其他任何内容。"
             )
 
         return {'system': system_prompt, 'user': user_prompt}
 
-    def _generate_tikz_with_qwen(self, image: Image.Image) -> Optional[str]:
+    @classmethod
+    def _extract_svg_json(cls, text: Optional[str]) -> Optional[str]:
+        if not text:
+            return None
+        match = cls.GEOMETRY_SVG_JSON_PATTERN.search(text)
+        if match:
+            return match.group(0)
+        return None
+
+    @staticmethod
+    def _extract_json_payload(raw: str) -> Optional[str]:
+        """提取可能包含在代码块中的JSON字符串"""
+        stripped = raw.strip()
+        if not stripped:
+            return None
+
+        if stripped.startswith('```'):
+            parts = stripped.split('```')
+            for part in parts:
+                candidate = part.strip()
+                if candidate.startswith('{') and candidate.endswith('}'):
+                    return candidate
+            return None
+
+        return stripped if stripped.startswith('{') and stripped.endswith('}') else None
+
+    @classmethod
+    def _parse_text_svg_json(cls, content: str) -> Optional[Dict[str, str]]:
+        """尝试解析LLM返回的 {"text": ..., "figure_svg": ...} 结构"""
+        try:
+            json_candidate = cls._extract_json_payload(content)
+            if not json_candidate:
+                return None
+            payload = json.loads(json_candidate)
+        except json.JSONDecodeError:
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        text_value = payload.get('text')
+        figure_svg = payload.get('figure_svg', '')
+
+        if not isinstance(text_value, str):
+            return None
+
+        if not isinstance(figure_svg, str):
+            figure_svg = ''
+
+        return {
+            'text': text_value,
+            'figure_svg': figure_svg,
+            'raw_json': content.strip()
+        }
+
+    def _normalize_llm_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """如果LLM返回JSON，解析并提取text/figure_svg"""
+        if not result:
+            return result
+
+        content = result.get('content')
+        if not isinstance(content, str):
+            return result
+
+        parsed = self._parse_text_svg_json(content)
+        if not parsed:
+            return result
+
+        text_value = parsed['text']
+        figure_svg = parsed.get('figure_svg', '')
+
+        result['content'] = text_value
+
+        metadata = result.setdefault('metadata', {})
+        metadata.setdefault('raw_llm_json', parsed.get('raw_json', content.strip()))
+        metadata.setdefault('figure_svg', figure_svg)
+        if figure_svg.strip():
+            metadata.setdefault('has_geometry', True)
+
+        return result
+
+    def _generate_svg_with_qwen(self, image: Image.Image) -> Optional[str]:
         import tempfile
 
         prompts = self._get_geometry_prompts()
@@ -449,48 +638,39 @@ class LLMClient:
                 }
             ]
 
+            # 获取max_tokens配置
+            max_tokens = int(os.getenv('QWEN_MAX_TOKENS', qwen_config.get('max_tokens', 4096)))
+
             call_kwargs = {
                 'model': model_name,
-                'messages': messages
+                'messages': messages,
+                'max_tokens': max_tokens  # 添加max_tokens参数
             }
             if self._qwen_supports_timeout:
                 call_kwargs['timeout'] = self.request_timeout
 
-            self._log_payload('qwen-tikz', call_kwargs)
-            logger.info("调用Qwen生成TikZ代码...")
+            self._log_payload('qwen-svg', call_kwargs)
+            logger.info("调用Qwen生成SVG Base64...")
             response = MultiModalConversation.call(**call_kwargs)
 
             if response.status_code != 200:
-                raise Exception(f"Qwen TikZ生成失败: {response.code} - {response.message}")
+                raise Exception(f"Qwen SVG生成失败: {response.code} - {response.message}")
 
-            tikz = response.output.choices[0].message.content[0]['text'].strip()
-            logger.info("Qwen返回TikZ代码 (前100字符): %s...", tikz[:100])
-
-            if '\\begin{tikzpicture}' not in tikz:
-                logger.warning("Qwen返回的内容不包含tikzpicture环境")
-            return tikz
+            svg_json = response.output.choices[0].message.content[0]['text'].strip()
+            logger.info("Qwen返回SVG JSON (前100字符): %s...", svg_json[:100])
+            return svg_json
         finally:
             import os as os_module
             if os_module.path.exists(temp_path):
                 os_module.unlink(temp_path)
 
-    @staticmethod
-    def _ensure_tikz_block(tikz: str) -> str:
-        tikz = tikz.strip()
-        if '\\begin{tikzpicture}' not in tikz:
-            logger.warning("生成的内容不包含tikzpicture环境，忽略插入")
-            return ''
-        if not tikz.startswith('```'):
-            tikz = f'```tikz\n{tikz}\n```'
-        return tikz
-
-    def _generate_tikz_with_openai(self, image: Image.Image) -> Optional[str]:
+    def _generate_svg_with_openai(self, image: Image.Image) -> Optional[str]:
         return None
 
-    def _generate_tikz_with_anthropic(self, image: Image.Image) -> Optional[str]:
+    def _generate_svg_with_anthropic(self, image: Image.Image) -> Optional[str]:
         return None
 
-    def _generate_tikz_with_gemini(self, image: Image.Image) -> Optional[str]:
+    def _generate_svg_with_gemini(self, image: Image.Image) -> Optional[str]:
         return None
     
     def _analyze_with_openai(self, image: Image.Image) -> Dict[str, Any]:
@@ -797,10 +977,14 @@ class LLMClient:
                 }
             ]
 
+            # 获取max_tokens配置
+            max_tokens = int(os.getenv('QWEN_MAX_TOKENS', qwen_config.get('max_tokens', 4096)))
+
             # 调用API
             call_kwargs = {
                 'model': model_name,
-                'messages': messages
+                'messages': messages,
+                'max_tokens': max_tokens  # 添加max_tokens参数
             }
             if self._qwen_supports_timeout:
                 call_kwargs['timeout'] = self.request_timeout

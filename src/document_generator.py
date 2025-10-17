@@ -5,6 +5,8 @@ Word文档生成模块
 
 import os
 import re
+import json
+import base64
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -20,12 +22,111 @@ from PIL import Image
 
 from .tikz_renderer import TikZRenderer
 
+try:
+    import cairosvg
+    CAIROSVG_AVAILABLE = True
+except ImportError:  # pragma: no cover - optional dependency
+    CAIROSVG_AVAILABLE = False
+    cairosvg = None
+
 logger = logging.getLogger(__name__)
 
 
 class DocumentGenerator:
     """Word文档生成器类"""
-    
+
+    # 简化的正则表达式，只用于初步定位
+    SVG_JSON_PATTERN = re.compile(
+        r'(?:【图形】\s*)?\{',
+        re.IGNORECASE
+    )
+
+    @staticmethod
+    def _extract_svg_json_blocks(text: str) -> List[tuple]:
+        """
+        提取文本中的SVG JSON块
+        返回: [(start, end, json_string), ...]
+        """
+        results = []
+        i = 0
+        while i < len(text):
+            # 寻找可能的JSON开始
+            marker_pos = text.find('【图形】', i)
+            if marker_pos != -1:
+                # 跳过【图形】后的空白，找到 {
+                j = marker_pos + 4  # len('【图形】') = 4
+                while j < len(text) and text[j].isspace():
+                    j += 1
+                if j < len(text) and text[j] == '{':
+                    start_pos = marker_pos
+                    json_start = j
+                else:
+                    i = marker_pos + 1
+                    continue
+            else:
+                # 没有标记，查找包含 "img_b64" 的 JSON
+                json_start = text.find('"img_b64"', i)
+                if json_start == -1:
+                    break
+                # 向前查找最近的 {
+                brace_pos = text.rfind('{', i, json_start)
+                if brace_pos == -1:
+                    i = json_start + 1
+                    continue
+                start_pos = brace_pos
+                json_start = brace_pos
+
+            # 从 { 开始，找到匹配的 }
+            brace_count = 0
+            in_string = False
+            escape = False
+            json_end = -1
+
+            for k in range(json_start, len(text)):
+                char = text[k]
+
+                if escape:
+                    escape = False
+                    continue
+
+                if char == '\\':
+                    escape = True
+                    continue
+
+                if char == '"':
+                    in_string = not in_string
+                    continue
+
+                if not in_string:
+                    if char == '{':
+                        brace_count += 1
+                    elif char == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            json_end = k + 1
+                            break
+
+            if json_end == -1:
+                # 没有找到匹配的 }
+                i = json_start + 1
+                continue
+
+            # 提取JSON字符串
+            json_str = text[json_start:json_end]
+
+            # 验证是否是SVG JSON
+            try:
+                data = json.loads(json_str)
+                if isinstance(data, dict) and 'img_b64' in data and data.get('format', '').lower() == 'svg':
+                    results.append((start_pos, json_end, json_str))
+                    i = json_end
+                else:
+                    i = json_start + 1
+            except json.JSONDecodeError:
+                i = json_start + 1
+
+        return results
+
     def __init__(self, config: dict):
         """
         初始化文档生成器
@@ -43,6 +144,10 @@ class DocumentGenerator:
 
         # 初始化TikZ渲染器
         self.tikz_renderer = TikZRenderer(config)
+
+        self.svg_converter_available = CAIROSVG_AVAILABLE
+        if not self.svg_converter_available:
+            logger.warning("cairosvg 未安装，SVG Base64 图形将无法渲染为图片")
 
         logger.info("DocumentGenerator initialized (TikZ enabled: %s)",
                    self.tikz_renderer.enabled)
@@ -185,13 +290,17 @@ class DocumentGenerator:
         logger.info("Adding element type=%s content_snippet=%s", element['type'], str(element.get('content', ''))[:100])
         if element['type'] == 'paragraph':
             self._add_paragraph(doc, element['content'])
-        
+
         elif element['type'] == 'text':
             # 处理包含行内公式的文本
             self._add_text_with_inline_formulas(doc, element['content'])
-        
+
         elif element['type'] == 'formula':
             self._add_formula(doc, element)
+
+        elif element['type'] == 'geometry_image':
+            # 添加几何图形
+            self._add_geometry_image(doc, element['image'])
 
     def _append_matrix_with_brackets(self, mtable, omml_parent, open_bracket: str, close_bracket: str) -> bool:
         """将MathML的mtable结构转换为带伸缩括号的OMML矩阵"""
@@ -275,6 +384,26 @@ class DocumentGenerator:
         cleaned = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]', '', text)
         return cleaned
 
+    def _add_geometry_image(self, doc: Document, image: Image.Image):
+        """添加几何图形到文档"""
+        try:
+            # 将PIL Image转换为字节流
+            image_stream = BytesIO()
+            image.save(image_stream, format='PNG')
+            image_stream.seek(0)
+
+            # 添加到文档
+            paragraph = doc.add_paragraph()
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = paragraph.add_run()
+            run.add_picture(image_stream, width=Inches(5.0))
+
+            logger.info("几何图形已添加到文档")
+        except Exception as e:
+            logger.error(f"添加几何图形失败: {e}")
+            # 添加错误提示
+            doc.add_paragraph(f"[几何图形渲染失败: {e}]")
+
     def _add_paragraph(self, doc: Document, text: str):
         """添加段落，支持行内公式和TikZ图形"""
         import re
@@ -282,6 +411,29 @@ class DocumentGenerator:
 
         # 清理XML不兼容的字符
         text = self._clean_xml_incompatible_chars(text)
+
+        # 使用新的JSON提取方法
+        svg_blocks = self._extract_svg_json_blocks(text)
+        if svg_blocks:
+            logger.info("Detected %s SVG JSON block(s) inside paragraph", len(svg_blocks))
+            current_pos = 0
+            for start_pos, end_pos, json_str in svg_blocks:
+                # 处理SVG块之前的文本
+                if start_pos > current_pos:
+                    pre_text = text[current_pos:start_pos].strip()
+                    if pre_text:
+                        self._add_text_with_inline_formulas(doc, pre_text)
+
+                # 添加SVG图像
+                self._add_svg_image_from_json(doc, json_str)
+                current_pos = end_pos
+
+            # 处理剩余文本
+            if current_pos < len(text):
+                remaining = text[current_pos:].strip()
+                if remaining:
+                    self._add_text_with_inline_formulas(doc, remaining)
+            return
 
         # 扫描所有代码块 (```lang ... ```)
         code_block_pattern = re.compile(r"```(?P<lang>[a-zA-Z0-9_-]+)?\s*\n?(?P<code>.*?)```", re.DOTALL)
@@ -464,6 +616,64 @@ class DocumentGenerator:
             run.font.size = Pt(self.doc_config.get('default_font_size', 11))
             if idx == 0:
                 paragraph.paragraph_format.space_before = Pt(6)
+
+    def _add_svg_image_from_json(self, doc: Document, json_payload: str):
+        """解析包含Base64 SVG的JSON并插入图片"""
+        try:
+            data = json.loads(json_payload)
+        except json.JSONDecodeError as exc:  # noqa: PERF203
+            logger.error("解析SVG JSON失败: %s", exc)
+            self._add_json_block(doc, json_payload)
+            return
+
+        img_b64 = data.get('img_b64')
+        fmt = (data.get('format') or '').lower()
+
+        if not img_b64 or fmt != 'svg':
+            logger.warning("SVG JSON缺少必要字段或格式不是svg: %s", json_payload[:80])
+            self._add_json_block(doc, json_payload)
+            return
+
+        if not self.svg_converter_available:
+            logger.error("cairosvg 未安装，无法渲染SVG Base64，保留JSON文本")
+            self._add_json_block(doc, json_payload)
+            return
+
+        try:
+            svg_bytes = base64.b64decode(img_b64)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("SVG Base64解码失败: %s", exc)
+            self._add_json_block(doc, json_payload)
+            return
+
+        try:
+            png_bytes = cairosvg.svg2png(bytestring=svg_bytes)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("SVG 转 PNG 初次失败，尝试自动修复: %s", exc)
+            try:
+                svg_text = svg_bytes.decode('utf-8', errors='ignore')
+            except Exception:  # noqa: BLE001
+                logger.error("SVG 字节无法解码为UTF-8，保留JSON文本")
+                self._add_json_block(doc, json_payload)
+                return
+
+            # 简单修复：去除重复双引号、裁剪控制字符
+            sanitized = svg_text.replace('""', '"').strip()
+            try:
+                png_bytes = cairosvg.svg2png(bytestring=sanitized.encode('utf-8'))
+                logger.info("SVG 修复后转换成功")
+            except Exception as exc_fix:  # noqa: BLE001
+                logger.error("SVG 自动修复仍失败: %s", exc_fix)
+                self._add_json_block(doc, json_payload)
+                return
+
+        img_buffer = BytesIO(png_bytes)
+        img_buffer.seek(0)
+
+        width = self.doc_config.get('image_width_inches', 6.0)
+        doc.add_picture(img_buffer, width=Inches(width))
+        doc.add_paragraph()
+        logger.info("SVG 图像已插入文档")
 
     @staticmethod
     def _extract_tikz_code(code: str) -> Optional[str]:
@@ -991,6 +1201,82 @@ class DocumentGenerator:
             'provider': f"{analysis_result.get('provider', 'unknown')} - {analysis_result.get('model', 'unknown')}",
             'subject': 'Math Problem OCR'
         }
+
+        # 检查是否有几何图形
+        llm_metadata = analysis_result.get('metadata', {})
+        geometry_image = llm_metadata.get('geometry_image')
+        figure_svg = llm_metadata.get('figure_svg') if isinstance(llm_metadata.get('figure_svg'), str) else None
+
+        geometry_inserted = False
+
+        # 如果有几何图形，将其插入到elements中
+        if geometry_image:
+            logger.info("检测到几何图形，将插入到文档中")
+            # 在【图形】位置前插入几何图片
+            for i, elem in enumerate(elements):
+                if elem.get('type') in ['paragraph', 'text']:
+                    content = elem.get('content', '') or ''
+                    if '【图形】' in content:
+                        # 分割内容
+                        parts = content.split('【图形】', 1)
+                        new_elements = []
+
+                        if parts[0].strip():
+                            new_elements.append({
+                                'type': elem['type'],
+                                'content': parts[0].strip()
+                            })
+
+                        new_elements.append({
+                            'type': 'geometry_image',
+                            'image': geometry_image
+                        })
+
+                        if len(parts) > 1 and parts[1].strip():
+                            remaining = parts[1]
+                            bracket_start = remaining.find('[')
+                            if bracket_start != -1:
+                                bracket_count = 0
+                                for j in range(bracket_start, len(remaining)):
+                                    if remaining[j] == '[':
+                                        bracket_count += 1
+                                    elif remaining[j] == ']':
+                                        bracket_count -= 1
+                                        if bracket_count == 0:
+                                            after_json = remaining[j + 1:].strip()
+                                            if after_json:
+                                                new_elements.append({
+                                                    'type': elem['type'],
+                                                    'content': after_json
+                                                })
+                                            break
+                            else:
+                                trimmed = remaining.strip()
+                                if trimmed:
+                                    new_elements.append({
+                                        'type': elem['type'],
+                                        'content': trimmed
+                                    })
+
+                        elements = elements[:i] + new_elements + elements[i + 1:]
+                        geometry_inserted = True
+                        break
+
+            if not geometry_inserted:
+                elements.append({
+                    'type': 'geometry_image',
+                    'image': geometry_image
+                })
+                geometry_inserted = True
+
+        elif figure_svg:
+            logger.info("检测到 figure_svg 字段但未渲染为图片，将在文档尾部保留SVG代码文本")
+            svg_block = figure_svg.strip()
+            if svg_block:
+                elements.append({
+                    'type': 'text',
+                    'content': svg_block
+                })
 
         # 创建文档
         doc = self.create_document(elements, original_image, metadata, minimal_layout=minimal_layout)

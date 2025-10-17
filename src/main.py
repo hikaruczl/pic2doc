@@ -288,6 +288,26 @@ class AdvancedOCR:
         if total_usage:
             merged['usage'] = total_usage
 
+        # 合并metadata，特别是geometry_image
+        merged_metadata = {}
+        for segment in segments:
+            seg_metadata = segment.get('metadata', {})
+            # 合并metadata字段
+            for key, value in seg_metadata.items():
+                if key == 'geometry_image' and value:
+                    # geometry_image存在则使用（通常只有一个分片有）
+                    merged_metadata['geometry_image'] = value
+                elif key == 'geometry_elements' and value:
+                    merged_metadata['geometry_elements'] = value
+                elif key == 'has_geometry' and value:
+                    merged_metadata['has_geometry'] = True
+                elif key not in merged_metadata:
+                    # 其他metadata字段，如果还没设置则使用第一个
+                    merged_metadata[key] = value
+
+        if merged_metadata:
+            merged['metadata'] = merged_metadata
+
         return merged
 
     @staticmethod
