@@ -26,6 +26,13 @@ llm:
     max_tokens: 16384  # 进一步增加以处理复杂SVG
     temperature: 0.1
 
+  # 几何图形处理策略配置
+  geometry:
+    # 处理策略: "crop" = 直接裁剪原图, "svg" = 生成SVG矢量图
+    strategy: "crop"  # 默认使用裁剪策略，保留原图质量
+    # 注意: 系统会严格使用LLM返回的裁剪坐标，不使用默认坐标
+    # 如果LLM没有返回有效坐标，则不会进行裁剪
+
   # LLM请求超时时间(秒)
   request_timeout_seconds: 600
 
@@ -106,7 +113,7 @@ document:
 
 # Graphics Generation Settings (for 3D geometry, diagrams, etc.)
 graphics:
-  enabled: true
+  enabled: false  # Disable graphics generation, use crop strategy instead
   backend: "tikz"  # tikz, matplotlib, or svg
 
   tikz:
@@ -125,70 +132,34 @@ graphics:
 # Prompt Templates
 prompts:
   system_message: |
-    You are an expert in accurately transcribing mathematical content from images.
-    Always respond in Chinese unless a different language is explicitly requested.
-    Faithfully reproduce ALL visible content: text, formulas, labels, and geometry annotations, preserving the original wording and order without adding commentary.
+    You are an expert at transcribing mathematical content.
+    Output ONLY a valid JSON object: {"text": "content", "geometry_crop_box": "coords_or_empty"}
 
-    ⚙️ 统一输出格式
-    - 你必须只输出一个合法的 JSON 对象：{"text": "...", "figure_svg": "..."}
-    - 不要添加 Markdown、额外说明、代码块或多余键。
-    - JSON 字符串中的双引号必须写成 \"，换行写成 \n，确保整体可解析。
+    TEXT FIELD:
+    - Transcribe all visible text in Chinese
+    - Use $...$ for inline formulas, $$...$$ for display
+    - Convert ALL math symbols to LaTeX (e.g., \sum, \alpha, \sqrt, \frac, \infty)
+    - NO Unicode math symbols (Σ, α, ∞, etc.)
+    - ADD the marker "【图形】" before the text describing geometry
 
-    📄 “text” 字段要求
-    - 完整转录图片中的文字内容，保持原有段落和标点。
-    - 行内公式用 $...$，独立公式用 $$...$$。
-    - 所有数学符号转换为对应的 LaTeX 命令（见下方列表），严禁使用 Unicode 数学字符。
-    - 若图片包含几何题，需在文字描述中清楚说明图形信息，与 SVG 标注一致。
+    GEOMETRY FIELD:
+    - If image contains geometry: determine precise crop box coordinates
+    - Format: [x1, y1, x2, y2] where (x1,y1)=top-left, (x2,y2)=bottom-right
+    - IMPORTANT: Add 15-25 pixel padding/margin around the geometry
+    - Ensure the crop box includes the COMPLETE geometry with all LETTER LABELS (A, B, C, etc.) visible
+    - Include any text labels, angle marks, dimension markers near the geometry
+    - Coordinates are relative to the ORIGINAL image (before any preprocessing)
+    - If no geometry: set to null or empty array []
 
-    🖼️ “figure_svg” 字段要求
-    - 当图片含有几何图（平面或立体）时，提供与之匹配的完整 SVG 代码字符串；若没有图形，设置为空字符串 ""。
-    - 必须包含合适的 viewBox（例如 viewBox="0 0 200 200"）。
-    - 仅使用基础元素（<path>、<line>、<circle>、<text> 等），并保持 SVG 精简。
-    - 可见棱：stroke="black"、stroke-width="1" 的实线；不可见棱：同色细度但带 stroke-dasharray="4 3"。
-    - 在所有关键顶点附近使用 <text>（font-size 约 10px）标注大写字母，如 A、B、C、P、Q，位置应与文字描述一致。
-    - 默认填充为空（fill="none" 或省略），除非需要特殊强调。
-    - SVG 代码必须与题面一致，不得使用占位符或与文字不符的图形。
-
-    ✅ 必须使用的 LaTeX 命令
-    - 求和：\sum_{i=1}^{N}
-    - 连乘：\prod_{i=1}^{n}
-    - 积分：\int_{a}^{b}
-    - 平均/上划线：\bar{X}, \overline{XYZ}
-    - 分数：\frac{a}{b}
-    - 根号：\sqrt{expression}
-    - 无穷：\infty
-    - 希腊字母：\alpha, \beta, \gamma, \delta, \theta, \lambda, \mu, \pi, \sigma, \phi, \omega
-    - 关系符号：\approx, \neq, \leq, \geq, \in, \subset, \cup, \cap
-    - 运算符：\times, \div, \pm, \cdot
-    - 箭头：\rightarrow, \leftarrow, \Rightarrow, \Leftrightarrow
-    - 逻辑：\forall, \exists, \wedge, \vee, \neg
-    - 矩阵：\begin{pmatrix}...\end{pmatrix}, \begin{bmatrix}...\end{bmatrix}, \begin{vmatrix}...\end{vmatrix}
-
-    ❌ 禁止出现的 Unicode 数学字符
-    - Σ, ∑, Π, ∏, ∫, √, ∞ 等；请使用对应 LaTeX。
-    - α, β, γ, δ, θ, λ, μ, π, σ, φ, ω 等；请使用 \alpha 等写法。
-    - ≈, ≠, ≤, ≥, ∈, ⊂, ∪, ∩ 等；请使用 \approx 等写法。
-    - ×, ÷, ±, ⋅ 等；请使用 \times 等写法。
-    - 组合符号如 Ȳ、x̄ 等；请使用 \bar{Y}、\bar{x}。
-    - 形式如 (a+b)/c；请使用 \frac{a+b}{c}。
-
-    🧾 示例（仅供理解，不要抄写）
-    - 若图片展示公式“平均值 Ȳ = (1/N)ΣYᵢ”：
-      {"text": "平均值 $$\\bar{Y} = \\frac{1}{N}\\sum_{i=1}^{N} Y_i$$", "figure_svg": ""}
-    - 若图片含有立体几何图，需在 "text" 描述所有条件，并在 "figure_svg" 中给出匹配的 SVG。
-
-    始终保持 JSON 合法、文本与 SVG 对齐。
+    RULES:
+    - JSON must be valid and parseable
+    - Return crop box coordinates for geometry, not SVG code
+    - Include "【图形】" marker in the text before geometry description
+    - Do NOT add markdown, comments, or extra explanations
 
   user_message: |
-    请根据提供的图片内容完成以下任务，并严格按要求作答：
-
-    1. 只输出一个 JSON 对象：{"text": "...", "figure_svg": "..."}，不要添加其它文字或代码块。
-    2. "text" 内完整转录图片文字，保留原段落；公式使用 $...$ 或 $$...$$，并全部转换为标准 LaTeX 命令。
-    3. 如果图片出现几何图形，"figure_svg" 必须给出匹配的 SVG 代码字符串：含 viewBox，使用 <path>/<line>/<circle>/<text> 等元素；可见棱为黑色 1px 实线，隐藏棱使用 stroke-dasharray="4 3"；在顶点旁标注大写字母（字体约 10px）。
-    4. 如果没有几何图形，则将 "figure_svg" 设为 ""（空字符串）。
-    5. SVG 字符串内的双引号写成 \"，换行写成 \n，保证 JSON 可解析。
-    6. 禁止使用 Unicode 数学符号，全部改写为 LaTeX 命令（例如 \sum、\alpha、\sqrt 等）。
-    7. 不得使用占位符或与题意不符的内容，须确保文字与 SVG 完全一致。
+    Transcribe this math image. Output JSON: {"text": "...", "geometry_crop_box": [x1,y1,x2,y2] or null}
+    Convert all math to LaTeX. Add "【图形】" marker before geometry text.
 
 
 

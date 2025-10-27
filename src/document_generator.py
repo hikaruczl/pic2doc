@@ -169,13 +169,19 @@ class DocumentGenerator:
 
         layout = self.minimal_layout if minimal_layout is None else minimal_layout
 
+        # 保存原始图像宽度，用于几何图像尺寸计算
+        self._last_original_image_width = None
+        if original_image:
+            self._last_original_image_width = original_image.width
+            logger.debug("保存原始图像宽度: %spx", original_image.width)
+
         # 始终设置文档属性，便于追踪来源
         self._set_document_properties(doc, metadata)
 
         if layout:
             # 极简布局：只渲染内容，保持专注于公式预览
             for element in elements:
-                self._add_element(doc, element)
+                self._add_element(doc, element, original_image)
 
             logger.info("文档创建完成（极简布局），共 %s 个元素", len(elements))
             return doc
@@ -190,7 +196,7 @@ class DocumentGenerator:
         doc.add_paragraph('_' * 50)
 
         for element in elements:
-            self._add_element(doc, element)
+            self._add_element(doc, element, original_image)
 
         self._add_footer(doc, metadata)
 
@@ -285,7 +291,7 @@ class DocumentGenerator:
         # 添加空行
         doc.add_paragraph()
     
-    def _add_element(self, doc: Document, element: Dict):
+    def _add_element(self, doc: Document, element: Dict, original_image: Optional[Image.Image] = None):
         """添加单个元素到文档"""
         logger.info("Adding element type=%s content_snippet=%s", element['type'], str(element.get('content', ''))[:100])
         if element['type'] == 'paragraph':
@@ -299,8 +305,8 @@ class DocumentGenerator:
             self._add_formula(doc, element)
 
         elif element['type'] == 'geometry_image':
-            # 添加几何图形
-            self._add_geometry_image(doc, element['image'])
+            # 添加几何图形，传入原始图像用于尺寸计算
+            self._add_geometry_image(doc, element['image'], original_image)
 
     def _append_matrix_with_brackets(self, mtable, omml_parent, open_bracket: str, close_bracket: str) -> bool:
         """将MathML的mtable结构转换为带伸缩括号的OMML矩阵"""
@@ -384,7 +390,7 @@ class DocumentGenerator:
         cleaned = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]', '', text)
         return cleaned
 
-    def _add_geometry_image(self, doc: Document, image: Image.Image):
+    def _add_geometry_image(self, doc: Document, image: Image.Image, original_image: Optional[Image.Image] = None):
         """添加几何图形到文档"""
         try:
             # 将PIL Image转换为字节流
@@ -396,13 +402,40 @@ class DocumentGenerator:
             paragraph = doc.add_paragraph()
             paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
             run = paragraph.add_run()
-            run.add_picture(image_stream, width=Inches(5.0))
 
-            logger.info("几何图形已添加到文档")
+            # 计算合适的宽度：保持与原图相同的显示比例
+            image_width, image_height = image.size
+            max_width_inches = self.doc_config.get('image_width_inches', 6.0)
+
+            # 如果有原始图像参考，按比例计算显示尺寸
+            if original_image and hasattr(self, '_last_original_image_width'):
+                # 计算原始图像在Word中的显示宽度（通常是6英寸或更小）
+                original_display_width_inches = max_width_inches
+                # 计算裁剪图像应该的显示宽度
+                scale_factor = image_width / self._last_original_image_width
+                target_width_inches = original_display_width_inches * scale_factor
+                logger.info("基于原图显示尺寸计算: 原图%spx -> 显示%.2f英寸, "
+                           "裁剪图像%spx -> 显示%.2f英寸 (比例: %.3f)",
+                           self._last_original_image_width, max_width_inches,
+                           image_width, target_width_inches, scale_factor)
+            else:
+                # 备用方案：按DPI计算物理尺寸
+                dpi = 300
+                width_inches = image_width / dpi
+                target_width_inches = min(width_inches, max_width_inches)
+                logger.info("使用DPI计算尺寸: %spx / %sDPI = %.2f英寸", image_width, dpi, width_inches)
+
+            # 实际设置宽度，保持原始比例
+            run.add_picture(image_stream, width=Inches(target_width_inches))
+
+            logger.info("几何图形已添加到文档，原始尺寸: %sx%s像素, "
+                       "最终设置宽度: %.2f英寸 (宽高比: %.2f)",
+                       image_width, image_height, target_width_inches, image_width/image_height)
+            logger.info("提示: 在Word中可以手动调整图像大小以获得更好的显示效果")
         except Exception as e:
-            logger.error(f"添加几何图形失败: {e}")
+            logger.error("添加几何图形失败: %s", e)
             # 添加错误提示
-            doc.add_paragraph(f"[几何图形渲染失败: {e}]")
+            doc.add_paragraph("[几何图形渲染失败: %s]", e)
 
     def _add_paragraph(self, doc: Document, text: str):
         """添加段落，支持行内公式和TikZ图形"""
@@ -647,7 +680,47 @@ class DocumentGenerator:
             return
 
         try:
-            png_bytes = cairosvg.svg2png(bytestring=svg_bytes)
+            # 解析SVG以获取viewBox信息
+            svg_text = svg_bytes.decode('utf-8', errors='ignore')
+            import re
+
+            # 提取viewBox属性
+            viewbox_match = re.search(r'viewBox\s*=\s*["\']([^"\']+)["\']', svg_text, re.IGNORECASE)
+            output_width = None
+            output_height = None
+
+            if viewbox_match:
+                viewbox_parts = viewbox_match.group(1).split()
+                if len(viewbox_parts) == 4:
+                    # viewBox格式: min_x min_y width height
+                    vb_min_x, vb_min_y, vb_width, vb_height = map(float, viewbox_parts)
+                    # 使用viewBox的尺寸作为输出尺寸
+                    output_width = int(vb_width)
+                    output_height = int(vb_height)
+                    logger.debug(f"检测到viewBox: {viewbox_match.group(1)}, 使用输出尺寸: {output_width}x{output_height}")
+            else:
+                # 提取width和height属性
+                width_match = re.search(r'width\s*=\s*["\']([^"\']+)["\']', svg_text, re.IGNORECASE)
+                height_match = re.search(r'height\s*=\s*["\']([^"\']+)["\']', svg_text, re.IGNORECASE)
+
+                if width_match and height_match:
+                    try:
+                        output_width = int(float(width_match.group(1)))
+                        output_height = int(float(height_match.group(1)))
+                        logger.debug(f"使用SVG width/height属性: {output_width}x{output_height}")
+                    except (ValueError, TypeError):
+                        pass
+
+            # 使用cairosvg转换，指定输出尺寸
+            if output_width and output_height:
+                png_bytes = cairosvg.svg2png(
+                    bytestring=svg_bytes,
+                    output_width=output_width,
+                    output_height=output_height
+                )
+            else:
+                png_bytes = cairosvg.svg2png(bytestring=svg_bytes)
+
         except Exception as exc:  # noqa: BLE001
             logger.warning("SVG 转 PNG 初次失败，尝试自动修复: %s", exc)
             try:
@@ -660,7 +733,29 @@ class DocumentGenerator:
             # 简单修复：去除重复双引号、裁剪控制字符
             sanitized = svg_text.replace('""', '"').strip()
             try:
-                png_bytes = cairosvg.svg2png(bytestring=sanitized.encode('utf-8'))
+                svg_text = sanitized
+                # 重新解析修复后的SVG的viewBox
+                import re
+                viewbox_match = re.search(r'viewBox\s*=\s*["\']([^"\']+)["\']', svg_text, re.IGNORECASE)
+                output_width = None
+                output_height = None
+
+                if viewbox_match:
+                    viewbox_parts = viewbox_match.group(1).split()
+                    if len(viewbox_parts) == 4:
+                        vb_min_x, vb_min_y, vb_width, vb_height = map(float, viewbox_parts)
+                        output_width = int(vb_width)
+                        output_height = int(vb_height)
+
+                if output_width and output_height:
+                    png_bytes = cairosvg.svg2png(
+                        bytestring=svg_text.encode('utf-8'),
+                        output_width=output_width,
+                        output_height=output_height
+                    )
+                else:
+                    png_bytes = cairosvg.svg2png(bytestring=svg_text.encode('utf-8'))
+
                 logger.info("SVG 修复后转换成功")
             except Exception as exc_fix:  # noqa: BLE001
                 logger.error("SVG 自动修复仍失败: %s", exc_fix)
@@ -670,10 +765,30 @@ class DocumentGenerator:
         img_buffer = BytesIO(png_bytes)
         img_buffer.seek(0)
 
-        width = self.doc_config.get('image_width_inches', 6.0)
-        doc.add_picture(img_buffer, width=Inches(width))
+        # 获取PNG图像的实际尺寸
+        png_image = Image.open(img_buffer)
+        png_width, png_height = png_image.size
+
+        # 设置最大宽度（6英寸），保持原始宽高比
+        max_width_inches = self.doc_config.get('image_width_inches', 6.0)
+        dpi = 300
+
+        # 转换PNG像素尺寸到英寸
+        png_width_inches = png_width / dpi
+        png_height_inches = png_height / dpi
+
+        # 如果宽度超过最大值，按比例缩放
+        if png_width_inches > max_width_inches:
+            target_width_inches = max_width_inches
+        else:
+            # 使用原始尺寸，不强制拉伸
+            target_width_inches = png_width_inches
+
+        # 重置img_buffer位置并添加到文档
+        img_buffer.seek(0)
+        doc.add_picture(img_buffer, width=Inches(target_width_inches))
         doc.add_paragraph()
-        logger.info("SVG 图像已插入文档")
+        logger.info(f"SVG 图像已插入文档 (PNG尺寸: {png_width}x{png_height}px, 宽度: {target_width_inches:.2f}英寸)")
 
     @staticmethod
     def _extract_tikz_code(code: str) -> Optional[str]:

@@ -229,17 +229,20 @@ class LLMClient:
         
         return None
 
-    def analyze_images(self, images: List[Image.Image]) -> List[Dict[str, Any]]:
+    def analyze_images(self, images: List[Image.Image], original_image: Optional[Image.Image] = None) -> List[Dict[str, Any]]:
         """并行或串行分析多张图像"""
         if not images:
             return []
+
+        # 获取原图尺寸用于坐标转换
+        original_size = original_image.size if original_image else None
 
         if len(images) == 1 or not self.concurrent_enabled or self.max_parallel_requests <= 1:
             sequential_results: List[Dict[str, Any]] = []
             for idx, img in enumerate(images):
                 logger.info("串行处理图像分片 %s/%s", idx + 1, len(images))
                 result = self.analyze_image(img)
-                result = self._post_process_geometry(result, img)
+                result = self._post_process_geometry(result, img, original_size)
                 result['segment_index'] = idx
                 sequential_results.append(result)
             return sequential_results
@@ -250,7 +253,7 @@ class LLMClient:
         def _worker(index: int, img: Image.Image) -> Dict[str, Any]:
             logger.info("并行处理图像分片 %s/%s", index + 1, len(images))
             result = self.analyze_image(img)
-            result = self._post_process_geometry(result, img)
+            result = self._post_process_geometry(result, img, original_size)
             result['segment_index'] = index
             return result
 
@@ -287,13 +290,13 @@ class LLMClient:
     @staticmethod
     def _parse_svg_json_format(content: str) -> Optional[Dict[str, str]]:
         """
-        解析SVG-in-JSON格式: {"text": "...", "figure_svg": "<svg>...</svg>"}
+        解析SVG-in-JSON格式: {"text": "...", "figure_svg": "<svg>...</svg>", "geometry_crop_box": [...]}
 
         Args:
             content: LLM返回的原始内容
 
         Returns:
-            包含text和figure_svg的字典，解析失败返回None
+            包含text、figure_svg和geometry_crop_box的字典，解析失败返回None
         """
         # 清理可能的Markdown代码块标记
         cleaned_content = content.strip()
@@ -313,7 +316,8 @@ class LLMClient:
                 logger.info("成功解析SVG-in-JSON格式")
                 return {
                     'text': data.get('text', ''),
-                    'figure_svg': data.get('figure_svg', '')
+                    'figure_svg': data.get('figure_svg', ''),
+                    'geometry_crop_box': data.get('geometry_crop_box', None)
                 }
         except json.JSONDecodeError:
             # JSON解析失败，可能不是这种格式
@@ -321,7 +325,7 @@ class LLMClient:
 
         return None
 
-    def _post_process_geometry(self, result: Dict[str, Any], image: Image.Image) -> Dict[str, Any]:
+    def _post_process_geometry(self, result: Dict[str, Any], image: Image.Image, original_image_size: Optional[tuple] = None) -> Dict[str, Any]:
         """检测并处理几何图形JSON或SVG-in-JSON格式"""
         content = result.get('content')
         if not content or not isinstance(content, str):
@@ -329,19 +333,189 @@ class LLMClient:
 
         metadata = result.setdefault('metadata', {})
 
-        # 尝试解析SVG-in-JSON格式: {"text": "...", "figure_svg": "<svg>...</svg>"}
+        # 获取几何处理策略
+        geometry_config = self.config.get('llm', {}).get('geometry', {})
+        geometry_strategy = geometry_config.get('strategy', 'crop')
+        # 不再使用默认坐标，完全依赖LLM返回的真实坐标
+
+        # 计算坐标缩放比例
+        current_width, current_height = image.size
+        scale_x = 1.0
+        scale_y = 1.0
+        if original_image_size:
+            original_width, original_height = original_image_size
+            scale_x = current_width / original_width
+            scale_y = current_height / original_height
+            logger.info(f"图片尺寸变换: 原图{original_width}x{original_height} -> 当前{current_width}x{current_height}, 缩放比例: {scale_x:.3f}x{scale_y:.3f}")
+
+        # 尝试解析SVG-in-JSON格式: {"text": "...", "figure_svg": "<svg>...</svg>", "geometry_crop_box": [...]}
         svg_json_data = self._parse_svg_json_format(content)
         if svg_json_data:
             text_content = svg_json_data.get('text', '')
             figure_svg = svg_json_data.get('figure_svg', '')
+            geometry_crop_box = svg_json_data.get('geometry_crop_box', None)
 
             # 更新result中的content为提取的text
             if text_content:
                 result['content'] = text_content
                 logger.info("成功解析SVG-in-JSON格式，提取了文本内容")
 
+            # 如果有裁剪坐标，使用裁剪策略
+            if geometry_crop_box and geometry_strategy == 'crop':
+                logger.info(f"原始裁剪坐标: {geometry_crop_box}")
+                try:
+                    # 转换坐标系统：如果有原图尺寸，按比例转换
+                    if original_image_size and (scale_x != 1.0 or scale_y != 1.0):
+                        adjusted_crop_box = [
+                            int(geometry_crop_box[0] * scale_x),
+                            int(geometry_crop_box[1] * scale_y),
+                            int(geometry_crop_box[2] * scale_x),
+                            int(geometry_crop_box[3] * scale_y)
+                        ]
+                        logger.info(f"调整后裁剪坐标: {adjusted_crop_box}")
+                    else:
+                        adjusted_crop_box = geometry_crop_box
+
+                    # 验证坐标在图片范围内
+                    left, top, right, bottom = adjusted_crop_box
+                    left = max(0, min(left, current_width))
+                    top = max(0, min(top, current_height))
+                    right = max(0, min(right, current_width))
+                    bottom = max(0, min(bottom, current_height))
+
+                    # 智能添加边距 - 检测边缘内容密度，只向空白方向扩展
+                    original_left, original_top, original_right, original_bottom = left, top, right, bottom
+
+                    # 转换为numpy数组进行边缘检测
+                    import numpy as np
+                    img_array = np.array(image)
+
+                    # 计算当前裁剪区域内边缘的像素密度作为参考
+                    crop_area = img_array[top:bottom, left:right]
+                    if len(crop_area.shape) > 2:
+                        crop_gray = np.mean(crop_area, axis=2)
+                    else:
+                        crop_gray = crop_area
+                    crop_std = np.std(crop_gray)
+
+                    logger.debug("裁剪区域内像素密度: %.2f (作为参考基准)", crop_std)
+
+                    # 检测各个边缘 - 检查空白区域
+                    # 扩大检测范围到20像素，降低阈值到50%以捕获字母标注
+                    padding = 20
+                    density_threshold = 0.5  # 50%阈值（原30%），更宽松
+
+                    # 检测上边缘
+                    found_blank_top = False
+                    for offset in range(1, padding):
+                        check_y = max(0, top - offset)
+                        # 扩大检测区域宽度，确保捕获字母标注
+                        edge_region = img_array[check_y:check_y+1, max(0, left-10):min(current_width, right+10)]
+                        if len(edge_region.shape) > 2:
+                            edge_gray = np.mean(edge_region, axis=2)
+                        else:
+                            edge_gray = edge_region.flatten()
+                        edge_std = np.std(edge_gray)
+                        if edge_std < crop_std * density_threshold:
+                            top = check_y
+                            found_blank_top = True
+                            logger.info("上边缘检测: 边缘密度=%.2f < 基准密度=%.2f*%.0f%%, 扩展到 y=%s", edge_std, crop_std, density_threshold*100, check_y)
+                            break
+
+                    if not found_blank_top:
+                        logger.debug("上边缘: 无空白区域，不扩展")
+
+                    # 检测下边缘
+                    found_blank_bottom = False
+                    for offset in range(1, padding):
+                        check_y = min(current_height - 1, bottom + offset)
+                        edge_region = img_array[check_y:check_y+1, max(0, left-10):min(current_width, right+10)]
+                        if len(edge_region.shape) > 2:
+                            edge_gray = np.mean(edge_region, axis=2)
+                        else:
+                            edge_gray = edge_region.flatten()
+                        edge_std = np.std(edge_gray)
+                        if edge_std < crop_std * density_threshold:
+                            bottom = check_y + 1
+                            found_blank_bottom = True
+                            logger.info("下边缘检测: 边缘密度=%.2f < 基准密度=%.2f*%.0f%%, 扩展到 y=%s", edge_std, crop_std, density_threshold*100, check_y + 1)
+                            break
+
+                    if not found_blank_bottom:
+                        logger.debug("下边缘: 无空白区域，不扩展")
+
+                    # 检测左边缘
+                    found_blank_left = False
+                    for offset in range(1, padding):
+                        check_x = max(0, left - offset)
+                        # 扩大检测区域高度，确保捕获字母标注
+                        edge_region = img_array[max(0, top-10):min(current_height, bottom+10), check_x:check_x+1]
+                        if len(edge_region.shape) > 2:
+                            edge_gray = np.mean(edge_region, axis=1)
+                        else:
+                            edge_gray = edge_region.flatten()
+                        edge_std = np.std(edge_gray)
+                        if edge_std < crop_std * density_threshold:
+                            left = check_x
+                            found_blank_left = True
+                            logger.info("左边缘检测: 边缘密度=%.2f < 基准密度=%.2f*%.0f%%, 扩展到 x=%s", edge_std, crop_std, density_threshold*100, check_x)
+                            break
+
+                    if not found_blank_left:
+                        logger.debug("左边缘: 无空白区域，不扩展")
+
+                    # 检测右边缘
+                    found_blank_right = False
+                    for offset in range(1, padding):
+                        check_x = min(current_width - 1, right + offset)
+                        edge_region = img_array[max(0, top-10):min(current_height, bottom+10), check_x:check_x+1]
+                        if len(edge_region.shape) > 2:
+                            edge_gray = np.mean(edge_region, axis=1)
+                        else:
+                            edge_gray = edge_region.flatten()
+                        edge_std = np.std(edge_gray)
+                        if edge_std < crop_std * density_threshold:
+                            right = check_x + 1
+                            found_blank_right = True
+                            logger.info("右边缘检测: 边缘密度=%.2f < 基准密度=%.2f*%.0f%%, 扩展到 x=%s", edge_std, crop_std, density_threshold*100, check_x + 1)
+                            break
+
+                    if not found_blank_right:
+                        logger.debug("右边缘: 无空白区域，不扩展")
+
+                    # 如果所有方向都没有扩展，强制添加最小边距
+                    if not (found_blank_top or found_blank_bottom or found_blank_left or found_blank_right):
+                        min_padding = 15
+                        original_coords = [top, left, right, bottom]
+                        top = max(0, top - min_padding)
+                        left = max(0, left - min_padding)
+                        right = min(current_width, right + min_padding)
+                        bottom = min(current_height, bottom + min_padding)
+                        logger.info("未检测到空白区域，强制添加最小边距: %spx, 坐标从 %s 调整为 [%s, %s, %s, %s]",
+                                   min_padding, original_coords, top, left, right, bottom)
+
+                    # 确保坐标有效
+                    if left >= right or top >= bottom:
+                        logger.warning("无效的裁剪坐标: %s，跳过裁剪", adjusted_crop_box)
+                        # 不再使用默认坐标！如果坐标无效，就不裁剪
+                        return result
+
+                    final_crop_box = [left, top, right, bottom]
+                    logger.info("最终裁剪坐标: %s", final_crop_box)
+
+                    # 裁剪图片
+                    cropped_image = image.crop(final_crop_box)
+                    metadata['geometry_image'] = cropped_image
+                    metadata['geometry_crop_box'] = final_crop_box
+                    metadata['has_geometry'] = True
+                    logger.info(f"几何图形裁剪成功，尺寸: {cropped_image.size}")
+                except Exception as e:
+                    logger.error(f"几何图形裁剪失败: {e}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
+
             # 如果有SVG内容，渲染并保存到metadata
-            if figure_svg and figure_svg.strip():
+            elif figure_svg and figure_svg.strip() and geometry_strategy == 'svg':
                 logger.info(f"检测到 SVG 内容，长度: {len(figure_svg)} 字符")
                 metadata['figure_svg'] = figure_svg
                 metadata['has_geometry'] = True
@@ -362,6 +536,20 @@ class LLMClient:
             return result
 
         figure_svg = metadata.get('figure_svg')
+        geometry_crop_box = metadata.get('geometry_crop_box')
+
+        # 处理裁剪策略
+        if geometry_crop_box and geometry_strategy == 'crop':
+            logger.info(f"使用裁剪策略，裁剪坐标: {geometry_crop_box}")
+            try:
+                cropped_image = image.crop(geometry_crop_box)
+                metadata['geometry_image'] = cropped_image
+                metadata['has_geometry'] = True
+                logger.info(f"几何图形裁剪成功，尺寸: {cropped_image.size}")
+            except Exception as e:
+                logger.error(f"几何图形裁剪失败: {e}")
+
+        # 处理SVG策略
         if isinstance(figure_svg, str):
             figure_svg = figure_svg.strip()
         else:
@@ -370,7 +558,7 @@ class LLMClient:
         # 尝试解析几何JSON
         geometry_elements = parse_geometry_json(content)
 
-        if geometry_elements:
+        if geometry_elements and geometry_strategy == 'svg':
             logger.info(f"检测到 {len(geometry_elements)} 个几何元素")
             metadata['geometry_elements'] = geometry_elements
             metadata['has_geometry'] = True
@@ -386,7 +574,7 @@ class LLMClient:
                     logger.error(f"几何图形渲染失败: {e}")
             else:
                 logger.warning("几何渲染器不可用，无法生成几何图形")
-        elif figure_svg:
+        elif figure_svg and geometry_strategy == 'svg':
             logger.info("检测到 figure_svg 字段，将尝试渲染 SVG 图形")
             metadata['has_geometry'] = True
             if 'figure_svg' not in metadata:
@@ -559,7 +747,7 @@ class LLMClient:
 
     @classmethod
     def _parse_text_svg_json(cls, content: str) -> Optional[Dict[str, str]]:
-        """尝试解析LLM返回的 {"text": ..., "figure_svg": ...} 结构"""
+        """尝试解析LLM返回的 {"text": ..., "geometry_crop_box": ...} 或 {"text": ..., "figure_svg": ...} 结构"""
         try:
             json_candidate = cls._extract_json_payload(content)
             if not json_candidate:
@@ -573,6 +761,7 @@ class LLMClient:
 
         text_value = payload.get('text')
         figure_svg = payload.get('figure_svg', '')
+        geometry_crop_box = payload.get('geometry_crop_box', None)
 
         if not isinstance(text_value, str):
             return None
@@ -580,14 +769,18 @@ class LLMClient:
         if not isinstance(figure_svg, str):
             figure_svg = ''
 
+        if geometry_crop_box is not None and not isinstance(geometry_crop_box, list):
+            geometry_crop_box = None
+
         return {
             'text': text_value,
             'figure_svg': figure_svg,
+            'geometry_crop_box': geometry_crop_box,
             'raw_json': content.strip()
         }
 
     def _normalize_llm_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
-        """如果LLM返回JSON，解析并提取text/figure_svg"""
+        """如果LLM返回JSON，解析并提取text/figure_svg/geometry_crop_box"""
         if not result:
             return result
 
@@ -601,13 +794,18 @@ class LLMClient:
 
         text_value = parsed['text']
         figure_svg = parsed.get('figure_svg', '')
+        geometry_crop_box = parsed.get('geometry_crop_box', None)
 
         result['content'] = text_value
 
         metadata = result.setdefault('metadata', {})
         metadata.setdefault('raw_llm_json', parsed.get('raw_json', content.strip()))
         metadata.setdefault('figure_svg', figure_svg)
+        metadata.setdefault('geometry_crop_box', geometry_crop_box)
+
         if figure_svg.strip():
+            metadata.setdefault('has_geometry', True)
+        elif geometry_crop_box:
             metadata.setdefault('has_geometry', True)
 
         return result

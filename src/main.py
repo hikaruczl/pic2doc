@@ -150,7 +150,7 @@ class AdvancedOCR:
                 len(processed_images)
             )
 
-            analysis_segments = self.llm_client.analyze_images(processed_images)
+            analysis_segments = self.llm_client.analyze_images(processed_images, original_image)
             analysis_result = self._merge_analysis_segments(analysis_segments)
 
             content = analysis_result['content']
@@ -521,7 +521,7 @@ class AdvancedOCR:
                 all_original_images.append(original_image)
 
                 # 3. 调用LLM分析
-                analysis_segments = self.llm_client.analyze_images(processed_images)
+                analysis_segments = self.llm_client.analyze_images(processed_images, original_image)
                 analysis_result = self._merge_analysis_segments(analysis_segments)
 
                 content = analysis_result['content']
